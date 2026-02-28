@@ -1,0 +1,30 @@
+# Python
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/notehub.db
+backend/.env
+
+# Node
+frontend/node_modules/
+frontend/.expo/
+frontend/dist/
+
+# Expo
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+web-build/
+
+# OS
+.DS_Store
+*.log
+.env
+
+# API Keys - IMPORTANT
+*.env
+.env*

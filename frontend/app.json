@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "NoteHub",
+    "slug": "notehub",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0A0F"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "NoteHub needs camera access to capture notes from your surroundings."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "NoteHub needs access to your photos to save captures.",
+          "savePhotosPermission": "NoteHub needs access to save photos.",
+          "isAccessMediaLocationEnabled": true
+        }
+      ]
+    ],
+    "scheme": "notehub",
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0A0A0F"
+      },
+      "package": "com.notehub.app"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.notehub.app"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
