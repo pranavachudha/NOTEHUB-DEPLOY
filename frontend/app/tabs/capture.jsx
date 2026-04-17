@@ -36,8 +36,10 @@ export default function CaptureScreen() {
       const formData = new FormData();
       formData.append("title", title.trim());
       photos.forEach((p, i) => {
-        formData.append("images", { uri: p.uri, name: `photo_${i}.jpg`, type: "image/jpeg" });
+        // Use unique keys per image — React Native FormData drops duplicate keys
+        formData.append(`image_${i}`, { uri: p.uri, name: `photo_${i}.jpg`, type: "image/jpeg" });
       });
+      formData.append("image_count", photos.length.toString());
       await api.post("/documents/create", formData, { headers: { "Content-Type": "multipart/form-data" } });
       setPhotos([]);
       setTitle("");

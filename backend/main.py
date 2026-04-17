@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
@@ -160,8 +160,8 @@ def extract_text_from_image(image_bytes: bytes) -> str:
         res = http_requests.post(
             "http://localhost:11434/api/generate",
             json={
-                "model": "llama3.2-vision",
-                "prompt": "You are an OCR engine. Look at this image and transcribe ALL text you see, exactly as it appears, character by character. Do not summarize, explain, or add anything. Output only the raw text from the image.",
+                "model": "llava",
+                "prompt": "Extract all text from this image exactly as written, including any handwriting. Return only the extracted text, nothing else.",
                 "images": [image_b64],
                 "stream": False
             },
@@ -241,15 +241,38 @@ def create_pdf(title: str, pages: List[dict]) -> bytes:
 # ── Document Routes ───────────────────────────────────────────────────────────
 
 @app.post("/documents/create")
-async def create_document(
-    title: str = Form(...),
-    images: List[UploadFile] = File(...),
-    user_id: str = Depends(verify_token)
-):
+async def create_document(request: Request, user_id: str = Depends(verify_token)):
+    """
+    Accepts multipart form with:
+      - title: str
+      - image_count: int  (number of images)
+      - image_0, image_1, ..., image_N: UploadFile  (one field per page)
+
+    React Native FormData cannot reliably send repeated keys, so we use
+    unique field names per image instead.
+    """
+    form = await request.form()
+    title = form.get("title", "").strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="title is required")
+
+    # Collect all image_N fields in order
+    image_files = []
+    i = 0
+    while True:
+        field = form.get(f"image_{i}")
+        if field is None:
+            break
+        image_files.append(field)
+        i += 1
+
+    if not image_files:
+        raise HTTPException(status_code=422, detail="No images received. Expected fields: image_0, image_1, ...")
+
     pages = []
     all_text = []
 
-    for img_file in images:
+    for img_file in image_files:
         img_bytes = await img_file.read()
         text = extract_text_from_image(img_bytes)
         pages.append({"image_bytes": img_bytes, "text": text})
@@ -265,7 +288,7 @@ async def create_document(
     conn = get_db()
     conn.execute(
         "INSERT INTO documents (id, user_id, title, extracted_text, pdf_base64, image_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (doc_id, user_id, title, combined_text, pdf_b64, len(images), created_at)
+        (doc_id, user_id, title, combined_text, pdf_b64, len(image_files), created_at)
     )
     conn.commit()
     conn.close()
@@ -274,7 +297,7 @@ async def create_document(
         "id": doc_id,
         "title": title,
         "extracted_text": combined_text,
-        "image_count": len(images),
+        "image_count": len(image_files),
         "created_at": created_at
     }
 
