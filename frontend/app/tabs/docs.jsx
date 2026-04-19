@@ -17,6 +17,9 @@ export default function DocsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [downloading, setDownloading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [joinedChannels, setJoinedChannels] = useState([]);
+  const [showChannelSelect, setShowChannelSelect] = useState(false);
   const { show, element } = useAppAlert();
 
   useFocusEffect(useCallback(() => { loadDocs(); }, []));
@@ -52,6 +55,24 @@ export default function DocsScreen() {
       await Sharing.shareAsync(path, { mimeType: "application/pdf" });
     } catch { show("Error", "Could not download PDF."); }
     finally { setDownloading(false); }
+  }
+
+  async function fetchJoinedChannels() {
+    try {
+      const res = await api.get("/channels");
+      setJoinedChannels(res.data.filter(c => c.is_member));
+      setShowChannelSelect(true);
+    } catch { show("Error", "Could not load channels."); }
+  }
+
+  async function submitToChannel(channelId) {
+    setSubmitting(true);
+    try {
+      await api.post(`/channels/${channelId}/submit`, { document_id: selectedDoc.id });
+      show("Submitted", "Note submitted to channel for admin approval.");
+      setShowChannelSelect(false);
+    } catch { show("Error", "Could not submit note."); }
+    finally { setSubmitting(false); }
   }
 
   function formatDate(iso) {
@@ -135,6 +156,9 @@ export default function DocsScreen() {
                 <Ionicons name="close" size={22} color="#F5A623" />
               </TouchableOpacity>
               <Text style={s.modalTitle} numberOfLines={1}>{selectedDoc.title}</Text>
+              <TouchableOpacity onPress={fetchJoinedChannels} disabled={downloading || submitting} style={{ marginRight: 16 }}>
+                <Ionicons name="cloud-upload-outline" size={22} color="#F5A623" />
+              </TouchableOpacity>
               <TouchableOpacity onPress={() => downloadPDF(selectedDoc)} disabled={downloading}>
                 {downloading ? <ActivityIndicator color="#F5A623" size="small" /> : <Ionicons name="share-outline" size={22} color="#F5A623" />}
               </TouchableOpacity>
@@ -152,6 +176,30 @@ export default function DocsScreen() {
             </ScrollView>
           </SafeAreaView>
         )}
+      </Modal>
+
+      <Modal visible={showChannelSelect} animationType="fade" transparent>
+        <View style={s.modalOverlay}>
+          <View style={s.createModal}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 16, alignItems: "center" }}>
+              <Text style={s.createModalTitle}>Submit to Channel</Text>
+              <TouchableOpacity onPress={() => setShowChannelSelect(false)}><Ionicons name="close" size={24} color="#F5A623" /></TouchableOpacity>
+            </View>
+            {joinedChannels.length === 0 ? (
+              <Text style={{ color: "#7A6DC4", marginBottom: 20 }}>You haven't joined any channels yet.</Text>
+            ) : (
+              <ScrollView style={{ maxHeight: 300 }}>
+                {joinedChannels.map(c => (
+                  <TouchableOpacity key={c.id} style={s.channelRow} onPress={() => submitToChannel(c.id)} disabled={submitting}>
+                    <Ionicons name="library" size={20} color="#7A6DC4" />
+                    <Text style={s.channelName}>{c.name}</Text>
+                    {submitting ? <ActivityIndicator size="small" color="#F5A623" /> : <Ionicons name="chevron-forward" size={20} color="#3D348B" />}
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+          </View>
+        </View>
       </Modal>
     </SafeAreaView>
   );
@@ -192,4 +240,9 @@ const s = StyleSheet.create({
   modalMeta: { flexDirection: "row", gap: 8, paddingHorizontal: 20, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#1E1A4A", flexWrap: "wrap" },
   textBox: { backgroundColor: "#1E1A4A", borderRadius: 12, padding: 16, marginTop: 12, borderWidth: 1, borderColor: "#2D266B" },
   extractedText: { color: "#F8F6F0", fontSize: 15, lineHeight: 26 },
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "flex-end", padding: 20 },
+  createModal: { backgroundColor: "#1E1A4A", borderRadius: 20, padding: 20, borderWidth: 1, borderColor: "#2D266B", paddingBottom: 40 },
+  createModalTitle: { color: "#F8F6F0", fontSize: 20, fontWeight: "bold" },
+  channelRow: { flexDirection: "row", alignItems: "center", backgroundColor: "#0A0A0F", padding: 16, borderRadius: 12, marginBottom: 8, borderWidth: 1, borderColor: "#2D266B" },
+  channelName: { color: "#F8F6F0", fontSize: 16, fontWeight: "600", flex: 1, marginLeft: 12 },
 });

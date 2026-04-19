@@ -37,9 +37,10 @@ function TabBar({ state, descriptors, navigation }) {
   const icons = {
     capture: { active: "camera",        inactive: "camera-outline" },
     docs:    { active: "document-text", inactive: "document-text-outline" },
+    channels:{ active: "library",       inactive: "library-outline" },
     profile: { active: "person",        inactive: "person-outline" },
   };
-  const labels = { capture: "Capture", docs: "Docs", profile: "Profile" };
+  const labels = { capture: "Capture", docs: "Docs", channels: "Channels", profile: "Profile" };
 
   return (
     <View style={{ flexDirection: "row", backgroundColor: "#0D0B1E", borderTopWidth: 1, borderTopColor: "#1E1A4A", paddingBottom: 28, paddingTop: 12, paddingHorizontal: 8 }}>
@@ -78,6 +79,7 @@ export default function TabsLayout() {
     >
       <Tabs.Screen name="capture" options={{ title: "Capture" }} />
       <Tabs.Screen name="docs"    options={{ title: "Docs" }} />
+      <Tabs.Screen name="channels" options={{ title: "Channels" }} />
       <Tabs.Screen name="profile" options={{ title: "Profile" }} />
     </Tabs>
   );

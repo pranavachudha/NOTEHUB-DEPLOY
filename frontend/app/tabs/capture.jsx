@@ -1,18 +1,28 @@
-import { View, Text, TouchableOpacity, StyleSheet, Image, ScrollView, TextInput, Alert, ActivityIndicator } from "react-native";
+import { View, Text, TouchableOpacity, StyleSheet, Image, ScrollView, TextInput, Alert, ActivityIndicator, Modal } from "react-native";
 import { useState, useRef } from "react";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import api from "../../services/api";
 
-const MODES = { IDLE: "idle", CAMERA: "camera", REVIEW: "review", UPLOADING: "uploading" };
+const MODES = { IDLE: "idle", CAMERA: "camera", REVIEW: "review", UPLOADING: "uploading", EDIT_OUTPUT: "edit_output" };
 
 export default function CaptureScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [mode, setMode] = useState(MODES.IDLE);
   const [photos, setPhotos] = useState([]);
   const [title, setTitle] = useState("");
+  const [facing, setFacing] = useState("back");
+  const [flash, setFlash] = useState("off");
   const cameraRef = useRef(null);
+
+  // Edit Output & Channel Push states
+  const [extractedText, setExtractedText] = useState("");
+  const [createdDocId, setCreatedDocId] = useState(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [showChannelSelect, setShowChannelSelect] = useState(false);
+  const [joinedChannels, setJoinedChannels] = useState([]);
+  const [submittingToChannel, setSubmittingToChannel] = useState(false);
 
   async function openCamera() {
     if (!permission?.granted) {
@@ -40,38 +50,84 @@ export default function CaptureScreen() {
         formData.append(`image_${i}`, { uri: p.uri, name: `photo_${i}.jpg`, type: "image/jpeg" });
       });
       formData.append("image_count", photos.length.toString());
-      await api.post("/documents/create", formData, { headers: { "Content-Type": "multipart/form-data" } });
+      const res = await api.post("/documents/create", formData, { headers: { "Content-Type": "multipart/form-data" } });
       setPhotos([]);
-      setTitle("");
-      setMode(MODES.IDLE);
-      Alert.alert("✓ Saved!", "Your notes have been extracted and saved as a PDF.");
+      setCreatedDocId(res.data.id);
+      setExtractedText(res.data.extracted_text);
+      setMode(MODES.EDIT_OUTPUT);
     } catch {
       Alert.alert("Upload failed", "Could not save. Check your connection.");
       setMode(MODES.REVIEW);
     }
   }
 
+  async function saveDocs() {
+    setSavingEdit(true);
+    try {
+      await api.put(`/documents/${createdDocId}`, { title: title.trim(), extracted_text: extractedText });
+      Alert.alert("✓ Saved!", "Your notes have been updated and saved.");
+      setMode(MODES.IDLE);
+      setTitle("");
+      setExtractedText("");
+    } catch { Alert.alert("Error", "Could not save changes."); }
+    finally { setSavingEdit(false); }
+  }
+
+  async function fetchJoinedChannels() {
+    try {
+      const res = await api.get("/channels");
+      setJoinedChannels(res.data.filter(c => c.is_member));
+      setShowChannelSelect(true);
+    } catch { Alert.alert("Error", "Could not load channels."); }
+  }
+
+  async function submitToChannel(channelId) {
+    setSubmittingToChannel(true);
+    try {
+      // First save the current edits
+      await api.put(`/documents/${createdDocId}`, { title: title.trim(), extracted_text: extractedText });
+      // Then submit to channel
+      await api.post(`/channels/${channelId}/submit`, { document_id: createdDocId });
+      Alert.alert("✓ Pushed to Channel", "Note submitted for admin approval.");
+      setShowChannelSelect(false);
+      setMode(MODES.IDLE);
+      setTitle("");
+      setExtractedText("");
+    } catch { Alert.alert("Error", "Could not push to channel."); }
+    finally { setSubmittingToChannel(false); }
+  }
+
   // Camera mode
   if (mode === MODES.CAMERA) {
     return (
       <View style={{ flex: 1, backgroundColor: "#000" }}>
-        <CameraView ref={cameraRef} style={{ flex: 1 }} facing="back" />
+        <CameraView ref={cameraRef} style={{ flex: 1 }} facing={facing} flash={flash} />
         <View style={cam.topBar}>
-          <TouchableOpacity onPress={() => setMode(MODES.IDLE)} style={cam.iconBtn}>
-            <Ionicons name="close" size={28} color="white" />
-          </TouchableOpacity>
+          <View style={{ flexDirection: "row", alignItems: "center", width: 80 }}>
+            <TouchableOpacity onPress={() => setMode(MODES.IDLE)} style={cam.iconBtn}>
+              <Ionicons name="close" size={28} color="white" />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setFlash(f => f === "off" ? "on" : "off")} style={[cam.iconBtn, { marginLeft: 10 }]}>
+              <Ionicons name={flash === "on" ? "flash" : "flash-off"} size={24} color="white" />
+            </TouchableOpacity>
+          </View>
           <View style={cam.badge}>
             <Text style={cam.badgeText}>{photos.length} photo{photos.length !== 1 ? "s" : ""}</Text>
           </View>
-          {photos.length > 0
-            ? <TouchableOpacity onPress={() => setMode(MODES.REVIEW)} style={cam.doneBtn}>
+          <View style={{ width: 80, alignItems: "flex-end" }}>
+            {photos.length > 0 && (
+              <TouchableOpacity onPress={() => setMode(MODES.REVIEW)} style={cam.doneBtn}>
                 <Text style={{ color: "#0A0A0F", fontWeight: "bold" }}>Review</Text>
               </TouchableOpacity>
-            : <View style={{ width: 70 }} />}
+            )}
+          </View>
         </View>
         <View style={cam.bottomBar}>
           <TouchableOpacity onPress={takePicture}>
             <View style={cam.shutter} />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setFacing(f => f === "back" ? "front" : "back")} style={{ position: "absolute", right: 40, bottom: 65 }}>
+            <Ionicons name="camera-reverse" size={32} color="white" />
           </TouchableOpacity>
         </View>
       </View>
@@ -126,6 +182,60 @@ export default function CaptureScreen() {
     );
   }
 
+  // Edit Output mode
+  if (mode === MODES.EDIT_OUTPUT) {
+    return (
+      <SafeAreaView style={s.container}>
+        <View style={s.navBar}>
+          <Text style={s.navTitle}>Review Output</Text>
+        </View>
+        <ScrollView contentContainerStyle={{ padding: 20 }}>
+          <Text style={s.label}>Title</Text>
+          <TextInput style={s.input} value={title} onChangeText={setTitle} />
+          <Text style={[s.label, { marginTop: 20 }]}>Extracted Text</Text>
+          <TextInput 
+            style={[s.input, { height: 300, textAlignVertical: "top", fontSize: 14 }]} 
+            multiline 
+            value={extractedText} 
+            onChangeText={setExtractedText} 
+          />
+        </ScrollView>
+        <View style={[s.bottomAction, { flexDirection: "row", gap: 12 }]}>
+          <TouchableOpacity style={[s.btn, { flex: 1, backgroundColor: "#1E1A4A", borderWidth: 1, borderColor: "#2D266B" }]} onPress={saveDocs} disabled={savingEdit}>
+            {savingEdit ? <ActivityIndicator color="#F8F6F0" /> : <Text style={[s.btnText, { color: "#F8F6F0" }]}>Save to Docs</Text>}
+          </TouchableOpacity>
+          <TouchableOpacity style={[s.btn, { flex: 1 }]} onPress={fetchJoinedChannels} disabled={savingEdit}>
+            <Text style={s.btnText}>Push to Channel</Text>
+          </TouchableOpacity>
+        </View>
+
+        <Modal visible={showChannelSelect} animationType="fade" transparent>
+          <View style={s.modalOverlay}>
+            <View style={s.createModal}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 16, alignItems: "center" }}>
+                <Text style={s.createModalTitle}>Select Channel</Text>
+                <TouchableOpacity onPress={() => setShowChannelSelect(false)}><Ionicons name="close" size={24} color="#F5A623" /></TouchableOpacity>
+              </View>
+              {joinedChannels.length === 0 ? (
+                <Text style={{ color: "#7A6DC4", marginBottom: 20 }}>You haven't joined any channels yet.</Text>
+              ) : (
+                <ScrollView style={{ maxHeight: 300 }}>
+                  {joinedChannels.map(c => (
+                    <TouchableOpacity key={c.id} style={s.channelRow} onPress={() => submitToChannel(c.id)} disabled={submittingToChannel}>
+                      <Ionicons name="library" size={20} color="#7A6DC4" />
+                      <Text style={s.channelName}>{c.name}</Text>
+                      {submittingToChannel ? <ActivityIndicator size="small" color="#F5A623" /> : <Ionicons name="cloud-upload" size={20} color="#F5A623" />}
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
+            </View>
+          </View>
+        </Modal>
+      </SafeAreaView>
+    );
+  }
+
   // Idle mode
   return (
     <SafeAreaView style={s.container}>
@@ -171,6 +281,11 @@ const s = StyleSheet.create({
   cameraBtn: { width: 140, height: 140, borderRadius: 70, backgroundColor: "#1E1A4A", borderWidth: 3, borderColor: "#F5A623", alignItems: "center", justifyContent: "center", alignSelf: "center", marginTop: 32 },
   stepCard: { flexDirection: "row", alignItems: "center", backgroundColor: "#1E1A4A", borderRadius: 16, paddingHorizontal: 16, paddingVertical: 14 },
   stepNum: { width: 32, height: 32, borderRadius: 16, backgroundColor: "#F5A623", alignItems: "center", justifyContent: "center", marginRight: 12 },
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "flex-end", padding: 20 },
+  createModal: { backgroundColor: "#1E1A4A", borderRadius: 20, padding: 20, borderWidth: 1, borderColor: "#2D266B", paddingBottom: 40 },
+  createModalTitle: { color: "#F8F6F0", fontSize: 20, fontWeight: "bold" },
+  channelRow: { flexDirection: "row", alignItems: "center", backgroundColor: "#0A0A0F", padding: 16, borderRadius: 12, marginBottom: 8, borderWidth: 1, borderColor: "#2D266B" },
+  channelName: { color: "#F8F6F0", fontSize: 16, fontWeight: "600", flex: 1, marginLeft: 12 },
 });
 
 const cam = StyleSheet.create({

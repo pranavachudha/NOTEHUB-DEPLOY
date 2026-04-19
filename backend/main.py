@@ -10,7 +10,8 @@ import datetime
 import base64
 import os
 import uuid
-import pytesseract
+import cv2
+import numpy as np
 from PIL import Image
 import io
 from reportlab.pdfgen import canvas
@@ -64,6 +65,58 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS channels (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            admin_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (admin_id) REFERENCES users(id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS channel_members (
+            channel_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member',
+            joined_at TEXT NOT NULL,
+            PRIMARY KEY (channel_id, user_id),
+            FOREIGN KEY (channel_id) REFERENCES channels(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    try:
+        conn.execute("ALTER TABLE channel_members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
+    except sqlite3.OperationalError:
+        pass
+        
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS channel_notes (
+            id TEXT PRIMARY KEY,
+            channel_id TEXT NOT NULL,
+            document_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            submitted_by TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            FOREIGN KEY (channel_id) REFERENCES channels(id),
+            FOREIGN KEY (document_id) REFERENCES documents(id),
+            FOREIGN KEY (submitted_by) REFERENCES users(id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            sender_id TEXT NOT NULL,
+            reference_id TEXT,
+            status TEXT NOT NULL DEFAULT 'unread',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (sender_id) REFERENCES users(id)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -106,6 +159,20 @@ class UserResponse(BaseModel):
     name: str
     email: str
     created_at: str
+
+class ChannelCreate(BaseModel):
+    name: str
+    description: str
+
+class SubmitNoteRequest(BaseModel):
+    document_id: str
+
+class RoleUpdate(BaseModel):
+    role: str
+
+class DocumentUpdate(BaseModel):
+    title: str
+    extracted_text: str
 
 # ── Auth Routes ───────────────────────────────────────────────────────────────
 
@@ -153,19 +220,54 @@ def me(user_id: str = Depends(verify_token)):
         raise HTTPException(status_code=404, detail="User not found")
     return dict(user)
 
+def preprocess_image(image_bytes: bytes) -> bytes:
+    """
+    OpenCV preprocessing pipeline to improve OCR accuracy:
+      1. Decode to numpy array
+      2. Convert to grayscale
+      3. Denoise (fastNlMeansDenoising)
+      4. Adaptive threshold (improves contrast on uneven lighting)
+      5. Re-encode to JPEG bytes
+    """
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    # Resize if very large — keeps detail but reduces Ollama payload
+    max_dim = 1600
+    h, w = img.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    denoised = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+    thresh = cv2.adaptiveThreshold(
+        denoised, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        blockSize=31, C=10
+    )
+
+    success, buf = cv2.imencode(".jpg", thresh, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not success:
+        return image_bytes  # fall back to original if encoding fails
+    return buf.tobytes()
+
+
 def extract_text_from_image(image_bytes: bytes) -> str:
     try:
-        image_b64 = b64.b64encode(image_bytes).decode("utf-8")
+        processed = preprocess_image(image_bytes)
+        image_b64 = b64.b64encode(processed).decode("utf-8")
 
         res = http_requests.post(
             "http://localhost:11434/api/generate",
             json={
-                "model": "llava",
+                "model": "llama3.2-vision",
                 "prompt": "Extract all text from this image exactly as written, including any handwriting. Return only the extracted text, nothing else.",
                 "images": [image_b64],
                 "stream": False
             },
-            timeout=300
+            timeout=480  # 8 min — llama3.2-vision is heavier, needs more time on CPU
         )
 
         result = res.json()
@@ -331,6 +433,331 @@ def delete_document(doc_id: str, user_id: str = Depends(verify_token)):
     conn.close()
     return {"success": True}
 
+@app.put("/documents/{doc_id}")
+def update_document(doc_id: str, body: DocumentUpdate, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    conn.execute(
+        "UPDATE documents SET title = ?, extracted_text = ? WHERE id = ? AND user_id = ?",
+        (body.title, body.extracted_text, doc_id, user_id)
+    )
+    if conn.total_changes == 0:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Document not found")
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
 @app.get("/")
 def root():
     return {"message": "NoteHub API is running 📚"}
+
+# ── Channel Routes ────────────────────────────────────────────────────────────
+
+@app.post("/channels/create")
+def create_channel(body: ChannelCreate, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channel_id = str(uuid.uuid4())
+    created_at = datetime.datetime.utcnow().isoformat()
+    conn.execute(
+        "INSERT INTO channels (id, name, description, admin_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        (channel_id, body.name, body.description, user_id, created_at)
+    )
+    # Admin is automatically a member
+    conn.execute(
+        "INSERT INTO channel_members (channel_id, user_id, role, joined_at) VALUES (?, ?, 'admin', ?)",
+        (channel_id, user_id, created_at)
+    )
+    conn.commit()
+    conn.close()
+    return {"id": channel_id, "name": body.name, "description": body.description, "admin_id": user_id}
+
+@app.get("/channels")
+def list_channels(user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channels = conn.execute("SELECT * FROM channels ORDER BY created_at DESC").fetchall()
+    
+    joined = conn.execute("SELECT channel_id, role FROM channel_members WHERE user_id = ?", (user_id,)).fetchall()
+    joined_dict = {row["channel_id"]: row["role"] for row in joined}
+    conn.close()
+
+    result = []
+    for c in channels:
+        d = dict(c)
+        d["is_member"] = d["id"] in joined_dict
+        d["role"] = joined_dict.get(d["id"])
+        d["is_admin"] = d["admin_id"] == user_id
+        result.append(d)
+    return result
+
+@app.post("/channels/{channel_id}/join")
+def join_channel(channel_id: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO channel_members (channel_id, user_id, joined_at) VALUES (?, ?, ?)",
+            (channel_id, user_id, datetime.datetime.utcnow().isoformat())
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        pass # Already a member
+    finally:
+        conn.close()
+    return {"success": True}
+
+@app.post("/channels/{channel_id}/submit")
+def submit_note(channel_id: str, body: SubmitNoteRequest, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    member = conn.execute("SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id)).fetchone()
+    if not member:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Must join channel first")
+
+    doc = conn.execute("SELECT 1 FROM documents WHERE id = ? AND user_id = ?", (body.document_id, user_id)).fetchone()
+    if not doc:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    sub_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO channel_notes (id, channel_id, document_id, status, submitted_by, submitted_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (sub_id, channel_id, body.document_id, "pending", user_id, datetime.datetime.utcnow().isoformat())
+    )
+    conn.commit()
+    conn.close()
+    return {"id": sub_id, "status": "pending"}
+
+@app.get("/channels/{channel_id}/notes")
+def get_channel_notes(channel_id: str, limit: int = 20, offset: int = 0, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    member = conn.execute("SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id)).fetchone()
+    if not member:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Must join channel first")
+
+    notes = conn.execute("""
+        SELECT cn.id as submission_id, cn.submitted_at, d.id, d.title, d.extracted_text, d.image_count, d.created_at, u.name as author_name
+        FROM channel_notes cn
+        JOIN documents d ON cn.document_id = d.id
+        JOIN users u ON cn.submitted_by = u.id
+        WHERE cn.channel_id = ? AND cn.status = 'approved'
+        ORDER BY cn.submitted_at DESC
+        LIMIT ? OFFSET ?
+    """, (channel_id, limit + 1, offset)).fetchall()
+    
+    has_more = len(notes) > limit
+    notes = notes[:limit]
+    
+    my_pending = []
+    if offset == 0:
+        my_pending = conn.execute("""
+            SELECT cn.id as submission_id, cn.submitted_at, d.id, d.title, d.extracted_text, d.image_count, cn.status
+            FROM channel_notes cn
+            JOIN documents d ON cn.document_id = d.id
+            WHERE cn.channel_id = ? AND cn.submitted_by = ? AND cn.status IN ('pending', 'rejected')
+        """, (channel_id, user_id)).fetchall()
+
+    conn.close()
+    return {
+        "approved": [dict(n) for n in notes],
+        "has_more": has_more,
+        "my_submissions": [dict(n) for n in my_pending]
+    }
+
+@app.get("/channels/{channel_id}/queue")
+def get_channel_queue(channel_id: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    if not channel:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Channel not found")
+        
+    member = conn.execute("SELECT role FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id)).fetchone()
+    if channel["admin_id"] != user_id and (not member or member["role"] not in ['admin', 'moderator']):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Admin or Moderator access required")
+
+    pending = conn.execute("""
+        SELECT cn.id as submission_id, cn.submitted_at, cn.status, d.id as doc_id, d.title, d.extracted_text, d.image_count, u.name as author_name
+        FROM channel_notes cn
+        JOIN documents d ON cn.document_id = d.id
+        JOIN users u ON cn.submitted_by = u.id
+        WHERE cn.channel_id = ? AND cn.status = 'pending'
+        ORDER BY cn.submitted_at ASC
+    """, (channel_id,)).fetchall()
+    
+    conn.close()
+    return [dict(p) for p in pending]
+
+@app.post("/channels/submissions/{submission_id}/approve")
+def approve_submission(submission_id: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    sub = conn.execute("SELECT channel_id FROM channel_notes WHERE id = ?", (submission_id,)).fetchone()
+    if not sub:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Submission not found")
+        
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (sub["channel_id"],)).fetchone()
+    member = conn.execute("SELECT role FROM channel_members WHERE channel_id = ? AND user_id = ?", (sub["channel_id"], user_id)).fetchone()
+    
+    if channel["admin_id"] != user_id and (not member or member["role"] not in ['admin', 'moderator']):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Admin or Moderator access required")
+        
+    conn.execute("UPDATE channel_notes SET status = 'approved' WHERE id = ?", (submission_id,))
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+@app.post("/channels/submissions/{submission_id}/reject")
+def reject_submission(submission_id: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    sub = conn.execute("SELECT channel_id FROM channel_notes WHERE id = ?", (submission_id,)).fetchone()
+    if not sub:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Submission not found")
+        
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (sub["channel_id"],)).fetchone()
+    member = conn.execute("SELECT role FROM channel_members WHERE channel_id = ? AND user_id = ?", (sub["channel_id"], user_id)).fetchone()
+    
+    if channel["admin_id"] != user_id and (not member or member["role"] not in ['admin', 'moderator']):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Admin or Moderator access required")
+        
+    conn.execute("UPDATE channel_notes SET status = 'rejected' WHERE id = ?", (submission_id,))
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+# ── Invite & Notification Routes ──────────────────────────────────────────────
+
+@app.get("/users/search")
+def search_users(q: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    users = conn.execute(
+        "SELECT id, name, email FROM users WHERE (name LIKE ? OR email LIKE ?) LIMIT 10",
+        (f"%{q}%", f"%{q}%")
+    ).fetchall()
+    conn.close()
+    return [dict(u) for u in users if u["id"] != user_id]
+
+@app.post("/channels/{channel_id}/invites")
+def invite_user(channel_id: str, body: dict, user_id: str = Depends(verify_token)):
+    target_user_id = body.get("user_id")
+    if not target_user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+        
+    conn = get_db()
+    
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    member = conn.execute("SELECT role FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id)).fetchone()
+    
+    if channel["admin_id"] != user_id and (not member or member["role"] not in ['admin', 'moderator']):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Admin or Moderator access required")
+        
+    existing_member = conn.execute("SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, target_user_id)).fetchone()
+    if existing_member:
+        conn.close()
+        raise HTTPException(status_code=400, detail="User is already a member")
+        
+    existing_invite = conn.execute(
+        "SELECT 1 FROM notifications WHERE user_id = ? AND reference_id = ? AND type = 'channel_invite' AND status = 'unread'",
+        (target_user_id, channel_id)
+    ).fetchone()
+    if existing_invite:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Invite already sent")
+        
+    notif_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO notifications (id, user_id, type, sender_id, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (notif_id, target_user_id, 'channel_invite', user_id, channel_id, datetime.datetime.utcnow().isoformat())
+    )
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+@app.get("/notifications")
+def get_notifications(user_id: str = Depends(verify_token)):
+    conn = get_db()
+    notifs = conn.execute("""
+        SELECT n.*, u.name as sender_name, c.name as channel_name 
+        FROM notifications n
+        JOIN users u ON n.sender_id = u.id
+        LEFT JOIN channels c ON n.reference_id = c.id
+        WHERE n.user_id = ? AND n.status = 'unread'
+        ORDER BY n.created_at DESC
+    """, (user_id,)).fetchall()
+    conn.close()
+    return [dict(n) for n in notifs]
+
+@app.post("/notifications/{notif_id}/accept")
+def accept_notification(notif_id: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    notif = conn.execute("SELECT * FROM notifications WHERE id = ? AND user_id = ? AND status = 'unread'", (notif_id, user_id)).fetchone()
+    if not notif:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Notification not found")
+        
+    conn.execute("UPDATE notifications SET status = 'accepted' WHERE id = ?", (notif_id,))
+    
+    if notif["type"] == 'channel_invite':
+        try:
+            conn.execute(
+                "INSERT INTO channel_members (channel_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
+                (notif["reference_id"], user_id, datetime.datetime.utcnow().isoformat())
+            )
+        except sqlite3.IntegrityError:
+            pass # Already member
+            
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+@app.post("/notifications/{notif_id}/decline")
+def decline_notification(notif_id: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    conn.execute("UPDATE notifications SET status = 'declined' WHERE id = ? AND user_id = ?", (notif_id, user_id))
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+@app.get("/channels/{channel_id}/members")
+def get_channel_members(channel_id: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    member = conn.execute("SELECT role FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id)).fetchone()
+    
+    if channel["admin_id"] != user_id and (not member or member["role"] not in ['admin', 'moderator']):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Admin or Moderator access required")
+        
+    members = conn.execute("""
+        SELECT cm.user_id, cm.role, cm.joined_at, u.name, u.email
+        FROM channel_members cm
+        JOIN users u ON cm.user_id = u.id
+        WHERE cm.channel_id = ?
+        ORDER BY cm.joined_at DESC
+    """, (channel_id,)).fetchall()
+    conn.close()
+    return [dict(m) for m in members]
+
+@app.put("/channels/{channel_id}/members/{target_user_id}/role")
+def update_member_role(channel_id: str, target_user_id: str, body: RoleUpdate, user_id: str = Depends(verify_token)):
+    if body.role not in ['member', 'moderator']:
+        raise HTTPException(status_code=400, detail="Invalid role. Must be 'member' or 'moderator'.")
+        
+    conn = get_db()
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    if not channel or channel["admin_id"] != user_id:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Only the channel admin can change roles")
+        
+    if target_user_id == channel["admin_id"]:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Cannot change admin role")
+        
+    conn.execute("UPDATE channel_members SET role = ? WHERE channel_id = ? AND user_id = ?", (body.role, channel_id, target_user_id))
+    conn.commit()
+    conn.close()
+    return {"success": True}
