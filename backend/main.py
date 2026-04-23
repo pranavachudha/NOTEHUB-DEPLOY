@@ -128,6 +128,16 @@ def init_db():
             FOREIGN KEY (sender_id) REFERENCES users(id)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS document_pages (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            page_number INTEGER NOT NULL,
+            image_bytes BLOB,
+            extracted_text TEXT,
+            FOREIGN KEY (document_id) REFERENCES documents(id)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -273,10 +283,12 @@ def extract_text_from_image(image_bytes: bytes) -> str:
         processed = preprocess_image(image_bytes)
         image_b64 = b64.b64encode(processed).decode("utf-8")
 
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+        ollama_model = os.getenv("OLLAMA_MODEL", "llava")
         res = http_requests.post(
-            "http://localhost:11434/api/generate",
+            f"{ollama_url}/api/generate",
             json={
-                "model": "llama3.2-vision",
+                "model": ollama_model,
                 "prompt": "Extract all text from this image exactly as written, including any handwriting. Return only the extracted text, nothing else.",
                 "images": [image_b64],
                 "stream": False
@@ -489,6 +501,15 @@ async def create_document(request: Request, user_id: str = Depends(verify_token)
         "INSERT INTO documents (id, user_id, title, extracted_text, pdf_base64, image_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (doc_id, user_id, title, combined_text, pdf_b64, len(image_files), created_at)
     )
+    
+    # Save individual pages
+    for idx, page in enumerate(pages):
+        page_id = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO document_pages (id, document_id, page_number, image_bytes, extracted_text) VALUES (?, ?, ?, ?, ?)",
+            (page_id, doc_id, idx, page["image_bytes"], page["text"])
+        )
+        
     conn.commit()
     conn.close()
 
@@ -543,6 +564,72 @@ def update_document(doc_id: str, body: DocumentUpdate, user_id: str = Depends(ve
     conn.commit()
     conn.close()
     return {"success": True}
+
+@app.post("/documents/{doc_id}/pages")
+async def append_document_pages(doc_id: str, request: Request, user_id: str = Depends(verify_token)):
+    form = await request.form()
+    
+    # Collect new images
+    image_files = []
+    i = 0
+    while True:
+        field = form.get(f"image_{i}")
+        if field is None: break
+        image_files.append(field)
+        i += 1
+
+    if not image_files:
+        raise HTTPException(status_code=422, detail="No images received")
+
+    conn = get_db()
+    doc = conn.execute("SELECT * FROM documents WHERE id = ? AND user_id = ?", (doc_id, user_id)).fetchone()
+    if not doc:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Get existing pages to maintain order and for PDF re-gen
+    existing_pages = conn.execute(
+        "SELECT image_bytes, extracted_text FROM document_pages WHERE document_id = ? ORDER BY page_number ASC",
+        (doc_id,)
+    ).fetchall()
+    
+    pages = [dict(p) for p in existing_pages]
+    all_text = [p["extracted_text"] for p in pages]
+    
+    # Process new images
+    new_page_start_idx = len(pages)
+    for img_file in image_files:
+        img_bytes = await img_file.read()
+        text = extract_text_from_image(img_bytes)
+        pages.append({"image_bytes": img_bytes, "text": text})
+        all_text.append(text)
+        
+        # Save to DB
+        page_id = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO document_pages (id, document_id, page_number, image_bytes, extracted_text) VALUES (?, ?, ?, ?, ?)",
+            (page_id, doc_id, new_page_start_idx, img_bytes, text)
+        )
+        new_page_start_idx += 1
+
+    # Re-generate PDF and combined text
+    pdf_bytes = create_pdf(doc["title"], pages)
+    pdf_b64 = base64.b64encode(pdf_bytes).decode()
+    combined_text = "\n\n--- Page Break ---\n\n".join(all_text)
+
+    conn.execute(
+        "UPDATE documents SET extracted_text = ?, pdf_base64 = ?, image_count = ? WHERE id = ?",
+        (combined_text, pdf_b64, len(pages), doc_id)
+    )
+    
+    conn.commit()
+    conn.close()
+
+    return {
+        "id": doc_id,
+        "extracted_text": combined_text,
+        "image_count": len(pages)
+    }
 
 @app.get("/")
 def root():

@@ -3,13 +3,18 @@ import { useState, useRef } from "react";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import api from "../../services/api";
 
 const MODES = { IDLE: "idle", CAMERA: "camera", REVIEW: "review", UPLOADING: "uploading", EDIT_OUTPUT: "edit_output" };
 
 export default function CaptureScreen() {
+  const params = useLocalSearchParams();
+  const router = useRouter();
+  const targetDocId = params.targetDocId;
+
   const [permission, requestPermission] = useCameraPermissions();
-  const [mode, setMode] = useState(MODES.IDLE);
+  const [mode, setMode] = useState(targetDocId ? MODES.CAMERA : MODES.IDLE);
   const [photos, setPhotos] = useState([]);
   const [title, setTitle] = useState("");
   const [facing, setFacing] = useState("back");
@@ -39,20 +44,28 @@ export default function CaptureScreen() {
   }
 
   async function uploadAndCreate() {
-    if (!title.trim()) { Alert.alert("Title required", "Give your notes a title."); return; }
+    if (!targetDocId && !title.trim()) { Alert.alert("Title required", "Give your notes a title."); return; }
     if (photos.length === 0) { Alert.alert("No photos", "Take at least one photo."); return; }
+    
     setMode(MODES.UPLOADING);
     try {
       const formData = new FormData();
-      formData.append("title", title.trim());
+      if (!targetDocId) formData.append("title", title.trim());
+      
       photos.forEach((p, i) => {
-        // Use unique keys per image — React Native FormData drops duplicate keys
         formData.append(`image_${i}`, { uri: p.uri, name: `photo_${i}.jpg`, type: "image/jpeg" });
       });
-      formData.append("image_count", photos.length.toString());
-      const res = await api.post("/documents/create", formData, { headers: { "Content-Type": "multipart/form-data" } });
+
+      let res;
+      if (targetDocId) {
+        res = await api.post(`/documents/${targetDocId}/pages`, formData, { headers: { "Content-Type": "multipart/form-data" } });
+        setCreatedDocId(targetDocId);
+      } else {
+        res = await api.post("/documents/create", formData, { headers: { "Content-Type": "multipart/form-data" } });
+        setCreatedDocId(res.data.id);
+      }
+
       setPhotos([]);
-      setCreatedDocId(res.data.id);
       setExtractedText(res.data.extracted_text);
       setMode(MODES.EDIT_OUTPUT);
     } catch {
@@ -148,9 +161,14 @@ export default function CaptureScreen() {
           </TouchableOpacity>
         </View>
         <ScrollView contentContainerStyle={{ padding: 20 }}>
-          <Text style={s.label}>Document Title</Text>
-          <TextInput style={s.input} placeholder="e.g. Chemistry Lecture 5" placeholderTextColor="#4a4460" value={title} onChangeText={setTitle} />
-          <Text style={[s.label, { marginTop: 20 }]}>Photos</Text>
+          {!targetDocId && (
+            <>
+              <Text style={s.label}>Document Title</Text>
+              <TextInput style={s.input} placeholder="e.g. Chemistry Lecture 5" placeholderTextColor="#4a4460" value={title} onChangeText={setTitle} />
+              <View style={{ height: 20 }} />
+            </>
+          )}
+          <Text style={s.label}>Photos</Text>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
             {photos.map((p, i) => (
               <View key={i} style={{ width: "30%" }}>
@@ -164,7 +182,7 @@ export default function CaptureScreen() {
         </ScrollView>
         <View style={s.bottomAction}>
           <TouchableOpacity style={s.btn} onPress={uploadAndCreate}>
-            <Text style={s.btnText}>Extract Text & Save PDF</Text>
+            <Text style={s.btnText}>{targetDocId ? "Append to Document" : "Extract Text & Save PDF"}</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>

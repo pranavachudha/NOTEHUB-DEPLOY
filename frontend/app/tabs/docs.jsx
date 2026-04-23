@@ -9,9 +9,11 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { useAppAlert } from "../../components/AppAlert";
+import { useRouter } from "expo-router";
 import api from "../../services/api";
 
 export default function DocsScreen() {
+  const router = useRouter();
   const [docs, setDocs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -211,6 +213,15 @@ export default function DocsScreen() {
                 </TouchableOpacity>
               ) : (
                 <>
+                  <TouchableOpacity 
+                    onPress={() => {
+                      setSelectedDoc(null);
+                      router.push({ pathname: "/tabs/capture", params: { targetDocId: selectedDoc.id } });
+                    }} 
+                    style={{ marginRight: 16 }}
+                  >
+                    <Ionicons name="camera-outline" size={22} color="#F5A623" />
+                  </TouchableOpacity>
                   <TouchableOpacity onPress={() => { setEditTitle(selectedDoc.title); setEditContent(selectedDoc.extracted_text || ""); setIsEditing(true); }} style={{ marginRight: 16 }}>
                     <Ionicons name="pencil" size={22} color="#F5A623" />
                   </TouchableOpacity>
