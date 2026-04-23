@@ -1,6 +1,6 @@
 import {
   View, Text, FlatList, TouchableOpacity,
-  ActivityIndicator, Modal, ScrollView, RefreshControl, StyleSheet,
+  ActivityIndicator, Modal, ScrollView, RefreshControl, StyleSheet, TextInput
 } from "react-native";
 import { useState, useCallback } from "react";
 import { useFocusEffect } from "expo-router";
@@ -20,7 +20,42 @@ export default function DocsScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [joinedChannels, setJoinedChannels] = useState([]);
   const [showChannelSelect, setShowChannelSelect] = useState(false);
+
+  // Edit states
+  const [isEditing, setIsEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editContent, setEditContent] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+
   const { show, element } = useAppAlert();
+
+  function wordCount(text) {
+    if (!text) return 0;
+    return text.trim().split(/\s+/).length;
+  }
+
+  function formatDate(iso) {
+    if (!iso) return "";
+    try {
+      const d = new Date(iso);
+      return d.toLocaleDateString();
+    } catch { return iso; }
+  }
+
+  async function saveDocEdit() {
+    setSavingEdit(true);
+    try {
+      await api.put(`/documents/${selectedDoc.id}`, { title: editTitle.trim(), extracted_text: editContent });
+      setSelectedDoc(prev => ({ ...prev, title: editTitle.trim(), extracted_text: editContent }));
+      setIsEditing(false);
+      loadDocs(true);
+      show("Saved", "Your document was updated.");
+    } catch (err) { 
+      console.error("Save error:", err);
+      show("Error", "Could not save document. Check your connection."); 
+    }
+    finally { setSavingEdit(false); }
+  }
 
   useFocusEffect(useCallback(() => { loadDocs(); }, []));
 
@@ -147,22 +182,48 @@ export default function DocsScreen() {
         />
       )}
 
-      <Modal visible={!!selectedDoc} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setSelectedDoc(null)}>
+      <Modal visible={!!selectedDoc} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => { setSelectedDoc(null); setIsEditing(false); }}>
         {selectedDoc && (
           <SafeAreaView style={s.container}>
             {element}
             <View style={s.modalHeader}>
-              <TouchableOpacity onPress={() => setSelectedDoc(null)} style={{ marginRight: 12 }}>
+              <TouchableOpacity onPress={() => { setSelectedDoc(null); setIsEditing(false); }} style={{ marginRight: 12 }}>
                 <Ionicons name="close" size={22} color="#F5A623" />
               </TouchableOpacity>
-              <Text style={s.modalTitle} numberOfLines={1}>{selectedDoc.title}</Text>
-              <TouchableOpacity onPress={fetchJoinedChannels} disabled={downloading || submitting} style={{ marginRight: 16 }}>
-                <Ionicons name="cloud-upload-outline" size={22} color="#F5A623" />
-              </TouchableOpacity>
-              <TouchableOpacity onPress={() => downloadPDF(selectedDoc)} disabled={downloading}>
-                {downloading ? <ActivityIndicator color="#F5A623" size="small" /> : <Ionicons name="share-outline" size={22} color="#F5A623" />}
-              </TouchableOpacity>
+              
+              {isEditing ? (
+                <TextInput 
+                  style={[s.modalTitle, s.editTitleInput]} 
+                  value={editTitle} 
+                  onChangeText={setEditTitle} 
+                />
+              ) : (
+                <Text style={s.modalTitle} numberOfLines={1}>{selectedDoc.title}</Text>
+              )}
+
+              {isEditing ? (
+                <TouchableOpacity onPress={saveDocEdit} disabled={savingEdit} style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                  {savingEdit ? <ActivityIndicator size="small" color="#F5A623" /> : (
+                    <>
+                      <Text style={{ color: "#F5A623", fontWeight: "bold" }}>Save</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              ) : (
+                <>
+                  <TouchableOpacity onPress={() => { setEditTitle(selectedDoc.title); setEditContent(selectedDoc.extracted_text || ""); setIsEditing(true); }} style={{ marginRight: 16 }}>
+                    <Ionicons name="pencil" size={22} color="#F5A623" />
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={fetchJoinedChannels} disabled={downloading || submitting} style={{ marginRight: 16 }}>
+                    <Ionicons name="cloud-upload-outline" size={22} color="#F5A623" />
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => downloadPDF(selectedDoc)} disabled={downloading}>
+                    {downloading ? <ActivityIndicator color="#F5A623" size="small" /> : <Ionicons name="share-outline" size={22} color="#F5A623" />}
+                  </TouchableOpacity>
+                </>
+              )}
             </View>
+            
             <View style={s.modalMeta}>
               <Chip icon="images-outline" label={`${selectedDoc.image_count} photo${selectedDoc.image_count !== 1 ? "s" : ""}`} />
               <Chip icon="calendar-outline" label={formatDate(selectedDoc.created_at)} />
@@ -171,7 +232,16 @@ export default function DocsScreen() {
             <ScrollView contentContainerStyle={{ padding: 20 }}>
               <Text style={s.screenLabel}>Extracted Text</Text>
               <View style={s.textBox}>
-                <Text style={s.extractedText}>{selectedDoc.extracted_text || "No text was extracted."}</Text>
+                {isEditing ? (
+                  <TextInput 
+                    style={[s.extractedText, { padding: 0 }]} 
+                    multiline 
+                    value={editContent} 
+                    onChangeText={setEditContent} 
+                  />
+                ) : (
+                  <Text style={s.extractedText}>{selectedDoc.extracted_text || "No text was extracted."}</Text>
+                )}
               </View>
             </ScrollView>
           </SafeAreaView>
@@ -237,6 +307,7 @@ const s = StyleSheet.create({
   exportText: { color: "#7A6DC4", fontSize: 13 },
   modalHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: "#1E1A4A" },
   modalTitle: { color: "#F8F6F0", fontWeight: "bold", fontSize: 16, flex: 1, marginRight: 12 },
+  editTitleInput: { backgroundColor: "#1E1A4A", borderWidth: 1, borderColor: "#2D266B", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
   modalMeta: { flexDirection: "row", gap: 8, paddingHorizontal: 20, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#1E1A4A", flexWrap: "wrap" },
   textBox: { backgroundColor: "#1E1A4A", borderRadius: 12, padding: 16, marginTop: 12, borderWidth: 1, borderColor: "#2D266B" },
   extractedText: { color: "#F8F6F0", fontSize: 15, lineHeight: 26 },

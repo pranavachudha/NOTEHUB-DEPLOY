@@ -1,11 +1,16 @@
 import {
   View, Text, FlatList, TouchableOpacity,
-  ActivityIndicator, Modal, ScrollView, RefreshControl, StyleSheet, TextInput
+  ActivityIndicator, Modal, ScrollView, RefreshControl, StyleSheet, TextInput,
+  Animated, PanResponder, LayoutAnimation
 } from "react-native";
-import { useState, useCallback } from "react";
+import { TouchableOpacity as GHTouchableOpacity, GestureHandlerRootView } from "react-native-gesture-handler";
+import DraggableFlatList, { ScaleDecorator } from "react-native-draggable-flatlist";
+import { useState, useCallback, useRef } from "react";
 import { useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
+import * as FileSystem from "expo-file-system";
+import * as Sharing from "expo-sharing";
 import { useAppAlert } from "../../components/AppAlert";
 import api from "../../services/api";
 
@@ -22,10 +27,12 @@ export default function ChannelsScreen() {
   const [loadingDetails, setLoadingDetails] = useState(false);
   const [activeTab, setActiveTab] = useState("approved"); // approved | my_submissions | queue | members
 
-  // Pagination states
+  // Pagination & Reorder states
   const [notesOffset, setNotesOffset] = useState(0);
   const [hasMoreNotes, setHasMoreNotes] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [isReordering, setIsReordering] = useState(false);
+  const [savingOrder, setSavingOrder] = useState(false);
 
   // Notification & Invite states
   const [showNotifications, setShowNotifications] = useState(false);
@@ -33,6 +40,12 @@ export default function ChannelsScreen() {
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
+
+  // Note Editing states
+  const [isEditingAll, setIsEditingAll] = useState(false);
+  const [modifiedNotes, setModifiedNotes] = useState({}); // submission_id -> text
+  const [savingBulk, setSavingBulk] = useState(false);
+  const [downloadingPDF, setDownloadingPDF] = useState(false);
 
   const { show, element } = useAppAlert();
 
@@ -66,6 +79,7 @@ export default function ChannelsScreen() {
     setSelectedChannel(channel);
     setLoadingDetails(true);
     setActiveTab("approved");
+    setIsReordering(false);
     setNotesOffset(0);
     setHasMoreNotes(false);
     try {
@@ -96,6 +110,101 @@ export default function ChannelsScreen() {
     finally { setLoadingMore(false); }
   }
 
+  async function bulkSaveNotes() {
+    setSavingBulk(true);
+    try {
+      const updates = channelNotes.approved.map(n => ({
+        submission_id: n.submission_id,
+        extracted_text: modifiedNotes[n.submission_id]?.text !== undefined ? modifiedNotes[n.submission_id].text : n.extracted_text,
+        heading: modifiedNotes[n.submission_id]?.heading !== undefined ? modifiedNotes[n.submission_id].heading : n.heading,
+        subheading: modifiedNotes[n.submission_id]?.subheading !== undefined ? modifiedNotes[n.submission_id].subheading : n.subheading
+      }));
+
+      await api.post(`/channels/${selectedChannel.id}/notes/bulk-update`, { updates });
+      
+      setChannelNotes(prev => ({
+        ...prev,
+        approved: prev.approved.map(n => {
+          const mod = modifiedNotes[n.submission_id];
+          if (!mod) return n;
+          return {
+            ...n,
+            extracted_text: mod.text !== undefined ? mod.text : n.extracted_text,
+            heading: mod.heading !== undefined ? mod.heading : n.heading,
+            subheading: mod.subheading !== undefined ? mod.subheading : n.subheading
+          };
+        })
+      }));
+      setIsEditingAll(false);
+      setModifiedNotes({});
+      show("Saved", "All changes saved successfully.");
+    } catch { show("Error", "Could not save changes."); }
+    finally { setSavingBulk(false); }
+  }
+
+  async function downloadChannelPDF() {
+    if (!selectedChannel) return;
+    setDownloadingPDF(true);
+    try {
+      const res = await api.get(`/channels/${selectedChannel.id}/export-pdf`);
+      const { pdf_base64, filename } = res.data;
+      const fileUri = `${FileSystem.documentDirectory}${filename}`;
+      await FileSystem.writeAsStringAsync(fileUri, pdf_base64, { encoding: FileSystem.EncodingType.Base64 });
+      await Sharing.shareAsync(fileUri);
+    } catch (err) {
+      console.error(err);
+      show("Error", "Could not generate PDF.");
+    } finally { setDownloadingPDF(false); }
+  }
+
+  async function leaveOrDeleteChannel() {
+    if (!selectedChannel) return;
+    
+    const isOwner = selectedChannel.is_admin;
+    const title = isOwner ? "Delete/Leave Channel" : "Leave Channel";
+    const message = isOwner 
+      ? "As the owner, if you leave, ownership will be transferred to a moderator or member. If no one else is in the channel, it will be deleted permanently. Are you sure?"
+      : "Are you sure you want to leave this channel?";
+
+    show(title, message, [
+      { text: "Cancel", style: "cancel" },
+      { 
+        text: isOwner ? "Leave & Transfer" : "Leave", 
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await api.delete(`/channels/${selectedChannel.id}`);
+            setSelectedChannel(null);
+            loadChannels(true);
+            show("Success", "Action completed successfully.");
+          } catch {
+            show("Error", "Could not complete action.");
+          }
+        }
+      }
+    ]);
+  }
+
+  async function saveReorder() {
+    setSavingOrder(true);
+    try {
+      const submission_ids = channelNotes.approved.map(n => n.submission_id);
+      await api.put(`/channels/${selectedChannel.id}/notes/reorder`, { submission_ids });
+      setIsReordering(false);
+      show("Saved", "Channel order updated successfully.");
+    } catch { show("Error", "Could not save new order."); }
+    finally { setSavingOrder(false); }
+  }
+
+  function moveNote(index, direction) {
+    const newNotes = [...channelNotes.approved];
+    const newPos = index + direction;
+    if (newPos < 0 || newPos >= newNotes.length) return;
+    const [moved] = newNotes.splice(index, 1);
+    newNotes.splice(newPos, 0, moved);
+    setChannelNotes(prev => ({ ...prev, approved: newNotes }));
+  }
+
   async function handleAcceptInvite(notifId) {
     try {
       await api.post(`/notifications/${notifId}/accept`);
@@ -110,6 +219,18 @@ export default function ChannelsScreen() {
       await api.post(`/notifications/${notifId}/decline`);
       loadNotifications();
     } catch { show("Error", "Could not decline invite."); }
+  }
+
+  async function removeMember(targetUserId) {
+    show("Remove Member", "Are you sure you want to remove this member?", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Remove", onPress: async () => {
+        try {
+          await api.delete(`/channels/${selectedChannel.id}/members/${targetUserId}`);
+          setMembers(prev => prev.filter(m => m.user_id !== targetUserId));
+        } catch { show("Error", "Could not remove member."); }
+      }}
+    ]);
   }
 
   async function searchUsers(q) {
@@ -219,10 +340,17 @@ export default function ChannelsScreen() {
           <SafeAreaView style={s.container}>
             {element}
             <View style={s.modalHeader}>
-              <TouchableOpacity onPress={() => setSelectedChannel(null)} style={{ marginRight: 12 }}>
-                <Ionicons name="close" size={22} color="#F5A623" />
+              <TouchableOpacity onPress={() => setSelectedChannel(null)} style={{ marginRight: 12 }}><Ionicons name="arrow-back" size={24} color="#F5A623" /></TouchableOpacity>
+              <View style={{ flex: 1 }}>
+                <Text style={s.modalTitle} numberOfLines={1}>{selectedChannel.name}</Text>
+                <Text style={s.memberEmail} numberOfLines={1}>{selectedChannel.description}</Text>
+              </View>
+              <TouchableOpacity onPress={downloadChannelPDF} disabled={downloadingPDF} style={{ padding: 8 }}>
+                {downloadingPDF ? <ActivityIndicator size="small" color="#F5A623" /> : <Ionicons name="download-outline" size={24} color="#F5A623" />}
               </TouchableOpacity>
-              <Text style={s.modalTitle} numberOfLines={1}>{selectedChannel.name}</Text>
+              <TouchableOpacity onPress={leaveOrDeleteChannel} style={{ padding: 8 }}>
+                <Ionicons name={selectedChannel.is_admin ? "trash-outline" : "log-out-outline"} size={24} color="#E85D75" />
+              </TouchableOpacity>
             </View>
 
             <View style={s.tabs}>
@@ -247,22 +375,125 @@ export default function ChannelsScreen() {
             {loadingDetails ? (
               <ActivityIndicator color="#F5A623" style={{ marginTop: 40 }} />
             ) : activeTab === "approved" ? (
-              <FlatList
-                 data={channelNotes.approved}
-                 keyExtractor={item => item.submission_id}
-                 contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
-                 onEndReached={loadMoreNotes}
-                 onEndReachedThreshold={0.5}
-                 ListFooterComponent={loadingMore ? <ActivityIndicator color="#F5A623" style={{ marginVertical: 10 }} /> : null}
-                 renderItem={({ item: note }) => (
-                  <View style={s.noteCard}>
-                    <Text style={s.noteTitle}>{note.title}</Text>
-                    <Text style={s.noteAuthor}>By {note.author_name}</Text>
-                    <Text style={s.notePreview} numberOfLines={3}>{note.extracted_text}</Text>
+              <View style={{ flex: 1 }}>
+                {(selectedChannel?.is_admin || selectedChannel?.role === 'moderator') && (
+                  <View style={{ flexDirection: "row", justifyContent: "flex-end", paddingHorizontal: 16, paddingTop: 16, paddingBottom: 24, gap: 12 }}>
+                    {isReordering ? (
+                      <TouchableOpacity onPress={saveReorder} disabled={savingOrder} style={[s.createBtn, { backgroundColor: "#F5A623" }]}>
+                        {savingOrder ? <ActivityIndicator size="small" color="#0A0A0F" /> : <Text style={s.createBtnText}>Save Order</Text>}
+                      </TouchableOpacity>
+                    ) : isEditingAll ? (
+                      <TouchableOpacity onPress={bulkSaveNotes} disabled={savingBulk} style={[s.createBtn, { backgroundColor: "#F5A623" }]}>
+                        {savingBulk ? <ActivityIndicator size="small" color="#0A0A0F" /> : <Text style={s.createBtnText}>Save Edits</Text>}
+                      </TouchableOpacity>
+                    ) : (
+                      <>
+                        <TouchableOpacity onPress={() => { setIsEditingAll(true); setModifiedNotes({}); }} style={[s.createBtn, { backgroundColor: "#2D266B" }]}>
+                          <Ionicons name="create-outline" size={16} color="#F5A623" />
+                          <Text style={[s.createBtnText, { color: "#F5A623" }]}>Edit Notes</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => setIsReordering(true)} style={[s.createBtn, { backgroundColor: "#2D266B" }]}>
+                          <Ionicons name="swap-vertical" size={16} color="#F5A623" />
+                          <Text style={[s.createBtnText, { color: "#F5A623" }]}>Reorder</Text>
+                        </TouchableOpacity>
+                      </>
+                    )}
                   </View>
-                 )}
-                 ListEmptyComponent={<Text style={s.emptyState}>Nothing to see here.</Text>}
-              />
+                )}
+                
+                <View style={{ flex: 1 }}>
+                  <GestureHandlerRootView style={{ flex: 1 }}>
+                    <DraggableFlatList
+                      data={channelNotes.approved}
+                      keyExtractor={note => note.submission_id}
+                      onDragEnd={({ data }) => {
+                        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                        setChannelNotes(prev => ({ ...prev, approved: data }));
+                      }}
+                      onEndReached={isReordering ? null : loadMoreNotes}
+                      onEndReachedThreshold={0.5}
+                      ListFooterComponent={loadingMore ? <ActivityIndicator color="#F5A623" style={{ marginVertical: 10 }} /> : null}
+                      contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
+                      renderItem={({ item: note, drag, isActive, index }) => {
+                        return (
+                          <ScaleDecorator activeScale={1.05}>
+                            <View 
+                              style={{ 
+                                marginBottom: isReordering ? 16 : 0, 
+                                paddingVertical: isReordering ? 16 : 20,
+                                backgroundColor: isReordering ? "#1E1A4A" : "transparent", 
+                                paddingHorizontal: isReordering ? 16 : 0, 
+                                borderRadius: 12, 
+                                borderWidth: isReordering ? 2 : 0, 
+                                borderBottomWidth: isReordering ? 2 : 1,
+                                borderColor: isActive ? "#F5A623" : "#2D266B",
+                                borderBottomColor: isReordering ? (isActive ? "#F5A623" : "#2D266B") : "#1E1A4A",
+                                flexDirection: "row",
+                                alignItems: "center",
+                                elevation: isActive ? 10 : 0,
+                                shadowColor: "#000",
+                                shadowOffset: { width: 0, height: 5 },
+                                shadowOpacity: isActive ? 0.3 : 0,
+                                shadowRadius: 10,
+                              }}
+                            >
+                              {isReordering && (
+                                <GHTouchableOpacity 
+                                  onLongPress={drag} 
+                                  delayLongPress={100}
+                                  style={{ marginRight: 12, padding: 10, backgroundColor: isActive ? "rgba(0,0,0,0.1)" : "#2D266B", borderRadius: 8 }}
+                                >
+                                  <Ionicons name="menu" size={24} color={isActive ? "#0A0A0F" : "#F5A623"} />
+                                </GHTouchableOpacity>
+                              )}
+
+                              <View style={{ flex: 1 }}>
+                                {isEditingAll ? (
+                                  <View style={{ gap: 8 }}>
+                                    <TextInput
+                                      placeholder="Heading"
+                                      placeholderTextColor="#4a4460"
+                                      style={{ color: "#F5A623", fontSize: 18, fontWeight: "bold", backgroundColor: "#120F2E", padding: 8, borderRadius: 8 }}
+                                      value={modifiedNotes[note.submission_id]?.heading !== undefined ? modifiedNotes[note.submission_id].heading : (note.heading || "")}
+                                      onChangeText={(text) => setModifiedNotes(prev => ({ ...prev, [note.submission_id]: { ...(prev[note.submission_id] || {}), heading: text } }))}
+                                    />
+                                    <TextInput
+                                      placeholder="Subheading"
+                                      placeholderTextColor="#4a4460"
+                                      style={{ color: "#7A6DC4", fontSize: 14, backgroundColor: "#120F2E", padding: 8, borderRadius: 8 }}
+                                      value={modifiedNotes[note.submission_id]?.subheading !== undefined ? modifiedNotes[note.submission_id].subheading : (note.subheading || "")}
+                                      onChangeText={(text) => setModifiedNotes(prev => ({ ...prev, [note.submission_id]: { ...(prev[note.submission_id] || {}), subheading: text } }))}
+                                    />
+                                    <TextInput
+                                      placeholder="Content"
+                                      placeholderTextColor="#4a4460"
+                                      style={{ color: "#F8F6F0", fontSize: 16, lineHeight: 26, backgroundColor: "#120F2E", padding: 8, borderRadius: 8 }}
+                                      value={modifiedNotes[note.submission_id]?.text !== undefined ? modifiedNotes[note.submission_id].text : note.extracted_text}
+                                      onChangeText={(text) => setModifiedNotes(prev => ({ ...prev, [note.submission_id]: { ...(prev[note.submission_id] || {}), text: text } }))}
+                                      multiline
+                                    />
+                                  </View>
+                                ) : (
+                                  <View>
+                                    {note.heading && <Text style={{ color: "#F5A623", fontSize: 18, fontWeight: "bold", marginBottom: 2 }}>{note.heading}</Text>}
+                                    {note.subheading && <Text style={{ color: "#7A6DC4", fontSize: 14, marginBottom: 8 }}>{note.subheading}</Text>}
+                                    <Text style={{ color: "#F8F6F0", fontSize: 16, lineHeight: 26 }} numberOfLines={isReordering ? 3 : undefined}>
+                                      {note.extracted_text}
+                                    </Text>
+                                  </View>
+                                )}
+                                <Text style={{ color: "#7A6DC4", fontSize: 12, marginTop: 4 }}>By {note.author_name}</Text>
+                              </View>
+
+                            </View>
+                          </ScaleDecorator>
+                        );
+                      }}
+                      ListEmptyComponent={<Text style={s.emptyState}>Nothing to see here.</Text>}
+                    />
+                  </GestureHandlerRootView>
+                </View>
+              </View>
             ) : (
               <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
                 {activeTab === "my_submissions" && channelNotes.my_submissions.map(note => (
@@ -299,19 +530,24 @@ export default function ChannelsScreen() {
                       <Ionicons name="person-add" size={16} color="#0A0A0F" />
                       <Text style={s.createBtnText}>Invite User</Text>
                     </TouchableOpacity>
-                    {members.map(m => (
+                    {members.filter(m => m.user_id !== selectedChannel.admin_id).map(m => (
                       <View key={m.user_id} style={s.memberRow}>
                         <View style={{ flex: 1 }}>
                           <Text style={s.memberName}>{m.name}</Text>
                           <Text style={s.memberEmail}>{m.email}</Text>
                         </View>
-                        {selectedChannel.is_admin && m.role !== 'admin' ? (
-                          <TouchableOpacity 
-                            style={s.roleBtn}
-                            onPress={() => changeRole(m.user_id, m.role === 'member' ? 'moderator' : 'member')}
-                          >
-                            <Text style={s.roleBtnText}>{m.role.toUpperCase()}</Text>
-                          </TouchableOpacity>
+                        {selectedChannel.is_admin ? (
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+                            <TouchableOpacity 
+                              style={s.roleBtn}
+                              onPress={() => changeRole(m.user_id, m.role === 'member' ? 'moderator' : 'member')}
+                            >
+                              <Text style={s.roleBtnText}>{m.role.toUpperCase()}</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity onPress={() => removeMember(m.user_id)} style={s.removeBtn}>
+                              <Ionicons name="trash-outline" size={20} color="#E85D75" />
+                            </TouchableOpacity>
+                          </View>
                         ) : (
                           <Text style={s.roleBadge}>{m.role.toUpperCase()}</Text>
                         )}
@@ -475,6 +711,7 @@ const s = StyleSheet.create({
   memberEmail: { color: "#7A6DC4", fontSize: 13 },
   roleBtn: { backgroundColor: "#2D266B", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 },
   roleBtnText: { color: "#F5A623", fontSize: 10, fontWeight: "bold" },
+  removeBtn: { padding: 4 },
   roleBadge: { color: "#4a4460", fontSize: 10, fontWeight: "bold", paddingHorizontal: 10, paddingVertical: 6 },
   notifCard: { backgroundColor: "#1E1A4A", padding: 16, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: "#2D266B", flexDirection: "row", alignItems: "center" },
   notifTitle: { color: "#F5A623", fontWeight: "bold", fontSize: 12, textTransform: "uppercase", marginBottom: 4 },

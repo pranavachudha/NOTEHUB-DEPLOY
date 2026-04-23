@@ -68,19 +68,23 @@ function TabBar({ state, descriptors, navigation }) {
   );
 }
 
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+
 export default function TabsLayout() {
   return (
-    <Tabs
-      tabBar={(props) => <TabBar {...props} />}
-      screenOptions={{
-        headerShown: false,
-        animation: "shift",
-      }}
-    >
-      <Tabs.Screen name="capture" options={{ title: "Capture" }} />
-      <Tabs.Screen name="docs"    options={{ title: "Docs" }} />
-      <Tabs.Screen name="channels" options={{ title: "Channels" }} />
-      <Tabs.Screen name="profile" options={{ title: "Profile" }} />
-    </Tabs>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <Tabs
+        tabBar={(props) => <TabBar {...props} />}
+        screenOptions={{
+          headerShown: false,
+          animation: "shift",
+        }}
+      >
+        <Tabs.Screen name="capture" options={{ title: "Capture" }} />
+        <Tabs.Screen name="docs"    options={{ title: "Docs" }} />
+        <Tabs.Screen name="channels" options={{ title: "Channels" }} />
+        <Tabs.Screen name="profile" options={{ title: "Profile" }} />
+      </Tabs>
+    </GestureHandlerRootView>
   );
 }

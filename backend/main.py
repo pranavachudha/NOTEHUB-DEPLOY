@@ -91,6 +91,13 @@ def init_db():
     except sqlite3.OperationalError:
         pass
         
+    try:
+        conn.execute("ALTER TABLE channel_notes ADD COLUMN order_index INTEGER DEFAULT 0")
+        conn.execute("ALTER TABLE channel_notes ADD COLUMN heading TEXT")
+        conn.execute("ALTER TABLE channel_notes ADD COLUMN subheading TEXT")
+    except sqlite3.OperationalError:
+        pass
+        
     conn.execute("""
         CREATE TABLE IF NOT EXISTS channel_notes (
             id TEXT PRIMARY KEY,
@@ -99,6 +106,9 @@ def init_db():
             status TEXT NOT NULL,
             submitted_by TEXT NOT NULL,
             submitted_at TEXT NOT NULL,
+            order_index INTEGER DEFAULT 0,
+            heading TEXT,
+            subheading TEXT,
             FOREIGN KEY (channel_id) REFERENCES channels(id),
             FOREIGN KEY (document_id) REFERENCES documents(id),
             FOREIGN KEY (submitted_by) REFERENCES users(id)
@@ -173,6 +183,9 @@ class RoleUpdate(BaseModel):
 class DocumentUpdate(BaseModel):
     title: str
     extracted_text: str
+
+class ReorderRequest(BaseModel):
+    submission_ids: List[str]
 
 # ── Auth Routes ───────────────────────────────────────────────────────────────
 
@@ -313,32 +326,115 @@ def create_pdf(title: str, pages: List[dict]) -> bytes:
                 c.drawImage(img_path, inch, y_start - new_h, width=new_w, height=new_h)
                 os.remove(img_path)
                 y_start = y_start - new_h - 0.3 * inch
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"PDF Image error: {e}")
 
-        # Draw extracted text
-        c.setFont("Helvetica-Bold", 11)
-        c.drawString(inch, y_start, f"Extracted Text (Page {i+1})")
-        y_start -= 0.2 * inch
-        c.line(inch, y_start, width - inch, y_start)
-        y_start -= 0.2 * inch
-
-        c.setFont("Helvetica", 10)
-        text = page.get("text", "No text detected.")
-        wrapped = textwrap.wrap(text, width=90)
-        for line in wrapped:
+        # Text
+        c.setFont("Helvetica", 11)
+        text = page.get("text", "")
+        lines = []
+        for line in text.split('\n'):
+            wrapped = textwrap.wrap(line, width=80)
+            lines.extend(wrapped if wrapped else [""])
+            
+        for line in lines:
             if y_start < inch:
                 c.showPage()
                 y_start = height - inch
-                c.setFont("Helvetica", 10)
             c.drawString(inch, y_start, line)
-            y_start -= 0.18 * inch
-
-        c.showPage()
+            y_start -= 14
+        
+        if i < len(pages) - 1:
+            c.showPage()
 
     c.save()
-    buffer.seek(0)
-    return buffer.read()
+    return buffer.getvalue()
+
+def create_channel_pdf(channel_name: str, notes: List[dict]) -> bytes:
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    
+    # Simple Header
+    c.setFont("Helvetica-Bold", 26)
+    c.drawCentredString(width/2, height - 1.5*inch, channel_name.upper())
+    c.line(inch, height - 1.8*inch, width - inch, height - 1.8*inch)
+    
+    y = height - 2.2*inch
+    for note in notes:
+        # Check for new page
+        if y < 1.5*inch:
+            c.showPage()
+            y = height - inch
+            
+        # Heading
+        if note.get("heading"):
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(inch, y, note["heading"])
+            y -= 22
+            
+        # Subheading
+        if note.get("subheading"):
+            c.setFont("Helvetica-Oblique", 12)
+            c.setFillColorRGB(0.3, 0.3, 0.3) # Dark grey
+            c.drawString(inch, y, note["subheading"])
+            c.setFillColorRGB(0, 0, 0) # Reset to black
+            y -= 18
+            
+        # Content
+        c.setFont("Helvetica", 11)
+        text = note.get("extracted_text", "")
+        lines = []
+        for line in text.split('\n'):
+            wrapped = textwrap.wrap(line, width=75)
+            lines.extend(wrapped if wrapped else [""])
+            
+        for line in lines:
+            if y < inch:
+                c.showPage()
+                y = height - inch
+            c.drawString(inch, y, line)
+            y -= 14
+        
+        y -= 30 # Spacing between notes
+        if y < inch:
+            c.showPage()
+            y = height - inch
+        else:
+            c.setDash(1, 2)
+            c.line(inch, y + 15, width - inch, y + 15)
+            c.setDash()
+        
+    c.save()
+    return buffer.getvalue()
+
+@app.get("/channels/{channel_id}/export-pdf")
+def export_channel_pdf(channel_id: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channel = conn.execute("SELECT name FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    if not channel:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Channel not found")
+        
+    member = conn.execute("SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id)).fetchone()
+    if not member:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Must be a member to export")
+        
+    notes = conn.execute("""
+        SELECT cn.submitted_at, d.extracted_text, u.name as author_name
+        FROM channel_notes cn
+        JOIN documents d ON cn.document_id = d.id
+        JOIN users u ON cn.submitted_by = u.id
+        WHERE cn.channel_id = ? AND cn.status = 'approved'
+        ORDER BY cn.order_index ASC, cn.submitted_at ASC
+    """, (channel_id,)).fetchall()
+    conn.close()
+    
+    pdf_bytes = create_channel_pdf(channel["name"], [dict(n) for n in notes])
+    pdf_b64 = base64.b64encode(pdf_bytes).decode()
+    return {"pdf_base64": pdf_b64, "filename": f"{channel['name']}_notes.pdf"}
+
 
 # ── Document Routes ───────────────────────────────────────────────────────────
 
@@ -474,7 +570,15 @@ def create_channel(body: ChannelCreate, user_id: str = Depends(verify_token)):
 @app.get("/channels")
 def list_channels(user_id: str = Depends(verify_token)):
     conn = get_db()
-    channels = conn.execute("SELECT * FROM channels ORDER BY created_at DESC").fetchall()
+    # Only get channels where user is a member OR has an unread invite
+    channels = conn.execute("""
+        SELECT DISTINCT c.* 
+        FROM channels c
+        LEFT JOIN channel_members cm ON c.id = cm.channel_id
+        LEFT JOIN notifications n ON c.id = n.reference_id AND n.type = 'channel_invite' AND n.status = 'unread'
+        WHERE cm.user_id = ? OR c.admin_id = ? OR n.user_id = ?
+        ORDER BY c.created_at DESC
+    """, (user_id, user_id, user_id)).fetchall()
     
     joined = conn.execute("SELECT channel_id, role FROM channel_members WHERE user_id = ?", (user_id,)).fetchall()
     joined_dict = {row["channel_id"]: row["role"] for row in joined}
@@ -503,6 +607,50 @@ def join_channel(channel_id: str, user_id: str = Depends(verify_token)):
     finally:
         conn.close()
     return {"success": True}
+
+@app.delete("/channels/{channel_id}")
+def delete_or_leave_channel(channel_id: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    if not channel:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Channel not found")
+        
+    if channel["admin_id"] != user_id:
+        conn.execute("DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id))
+        conn.commit()
+        conn.close()
+        return {"message": "Left channel"}
+
+    successor = conn.execute("""
+        SELECT user_id FROM channel_members 
+        WHERE channel_id = ? AND user_id != ? AND role = 'moderator'
+        ORDER BY RANDOM() LIMIT 1
+    """, (channel_id, user_id)).fetchone()
+    
+    if not successor:
+        successor = conn.execute("""
+            SELECT user_id FROM channel_members 
+            WHERE channel_id = ? AND user_id != ? AND role = 'member'
+            ORDER BY RANDOM() LIMIT 1
+        """, (channel_id, user_id)).fetchone()
+        
+    if successor:
+        new_owner_id = successor["user_id"]
+        conn.execute("UPDATE channels SET admin_id = ? WHERE id = ?", (new_owner_id, channel_id))
+        conn.execute("UPDATE channel_members SET role = 'admin' WHERE channel_id = ? AND user_id = ?", (channel_id, new_owner_id))
+        conn.execute("DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id))
+        conn.commit()
+        conn.close()
+        return {"message": "Ownership transferred and left channel"}
+    else:
+        conn.execute("DELETE FROM channel_notes WHERE channel_id = ?", (channel_id,))
+        conn.execute("DELETE FROM channel_members WHERE channel_id = ?", (channel_id,))
+        conn.execute("DELETE FROM notifications WHERE reference_id = ? AND type = 'channel_invite'", (channel_id,))
+        conn.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
+        conn.commit()
+        conn.close()
+        return {"message": "Channel deleted"}
 
 @app.post("/channels/{channel_id}/submit")
 def submit_note(channel_id: str, body: SubmitNoteRequest, user_id: str = Depends(verify_token)):
@@ -535,12 +683,12 @@ def get_channel_notes(channel_id: str, limit: int = 20, offset: int = 0, user_id
         raise HTTPException(status_code=403, detail="Must join channel first")
 
     notes = conn.execute("""
-        SELECT cn.id as submission_id, cn.submitted_at, d.id, d.title, d.extracted_text, d.image_count, d.created_at, u.name as author_name
+        SELECT cn.id as submission_id, cn.submitted_at, cn.heading, cn.subheading, d.id, d.title, d.extracted_text, d.image_count, d.created_at, u.name as author_name
         FROM channel_notes cn
         JOIN documents d ON cn.document_id = d.id
         JOIN users u ON cn.submitted_by = u.id
         WHERE cn.channel_id = ? AND cn.status = 'approved'
-        ORDER BY cn.submitted_at DESC
+        ORDER BY cn.order_index ASC, cn.submitted_at ASC
         LIMIT ? OFFSET ?
     """, (channel_id, limit + 1, offset)).fetchall()
     
@@ -562,6 +710,28 @@ def get_channel_notes(channel_id: str, limit: int = 20, offset: int = 0, user_id
         "has_more": has_more,
         "my_submissions": [dict(n) for n in my_pending]
     }
+
+@app.put("/channels/{channel_id}/notes/reorder")
+def reorder_notes(channel_id: str, body: ReorderRequest, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    if not channel:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Channel not found")
+        
+    member = conn.execute("SELECT role FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id)).fetchone()
+    if channel["admin_id"] != user_id and (not member or member["role"] not in ['admin', 'moderator']):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Admin or Moderator access required")
+
+    for i, sub_id in enumerate(body.submission_ids):
+        conn.execute(
+            "UPDATE channel_notes SET order_index = ? WHERE id = ? AND channel_id = ?",
+            (i, sub_id, channel_id)
+        )
+    conn.commit()
+    conn.close()
+    return {"success": True}
 
 @app.get("/channels/{channel_id}/queue")
 def get_channel_queue(channel_id: str, user_id: str = Depends(verify_token)):
@@ -587,6 +757,61 @@ def get_channel_queue(channel_id: str, user_id: str = Depends(verify_token)):
     
     conn.close()
     return [dict(p) for p in pending]
+
+class NoteUpdate(BaseModel):
+    extracted_text: str
+    heading: Optional[str] = None
+    subheading: Optional[str] = None
+
+@app.put("/channels/{channel_id}/notes/{submission_id}")
+def update_channel_note(channel_id: str, submission_id: str, body: NoteUpdate, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    member = conn.execute("SELECT role FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id)).fetchone()
+    if not channel or (channel["admin_id"] != user_id and (not member or member["role"] not in ['admin', 'moderator'])):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Admin or Moderator access required")
+    sub = conn.execute("SELECT document_id FROM channel_notes WHERE id = ? AND channel_id = ?", (submission_id, channel_id)).fetchone()
+    if not sub:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Submission not found")
+    
+    # Update document text
+    conn.execute("UPDATE documents SET extracted_text = ? WHERE id = ?", (body.extracted_text, sub["document_id"]))
+    # Update note heading/subheading
+    conn.execute("UPDATE channel_notes SET heading = ?, subheading = ? WHERE id = ?", (body.heading, body.subheading, submission_id))
+    
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+class BulkNoteUpdate(BaseModel):
+    updates: List[dict] # Each dict: {"submission_id": str, "extracted_text": str, "heading": str, "subheading": str}
+
+@app.post("/channels/{channel_id}/notes/bulk-update")
+def bulk_update_channel_notes(channel_id: str, body: BulkNoteUpdate, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    member = conn.execute("SELECT role FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id)).fetchone()
+    
+    if not channel or (channel["admin_id"] != user_id and (not member or member["role"] not in ['admin', 'moderator'])):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Admin or Moderator access required")
+        
+    for up in body.updates:
+        sub_id = up.get("submission_id")
+        text = up.get("extracted_text")
+        heading = up.get("heading")
+        subheading = up.get("subheading")
+        
+        sub = conn.execute("SELECT document_id FROM channel_notes WHERE id = ? AND channel_id = ?", (sub_id, channel_id)).fetchone()
+        if sub:
+            conn.execute("UPDATE documents SET extracted_text = ? WHERE id = ?", (text, sub["document_id"]))
+            conn.execute("UPDATE channel_notes SET heading = ?, subheading = ? WHERE id = ?", (heading, subheading, sub_id))
+            
+    conn.commit()
+    conn.close()
+    return {"success": True}
 
 @app.post("/channels/submissions/{submission_id}/approve")
 def approve_submission(submission_id: str, user_id: str = Depends(verify_token)):
@@ -758,6 +983,25 @@ def update_member_role(channel_id: str, target_user_id: str, body: RoleUpdate, u
         raise HTTPException(status_code=400, detail="Cannot change admin role")
         
     conn.execute("UPDATE channel_members SET role = ? WHERE channel_id = ? AND user_id = ?", (body.role, channel_id, target_user_id))
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+@app.delete("/channels/{channel_id}/members/{target_user_id}")
+def remove_member(channel_id: str, target_user_id: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    if not channel or channel["admin_id"] != user_id:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Only the channel admin can remove members")
+        
+    if target_user_id == channel["admin_id"]:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Cannot remove the admin from the channel")
+        
+    conn.execute("DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, target_user_id))
+    # Also remove any pending notes by this user if they are being removed? 
+    # Or keep them? Usually keep them, but they won't be able to submit more.
     conn.commit()
     conn.close()
     return {"success": True}
