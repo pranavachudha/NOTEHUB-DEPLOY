@@ -1,0 +1,8 @@
+__pycache__
+*.pyc
+venv
+.env
+notehub.db
+Dockerfile
+.dockerignore
+.python-version

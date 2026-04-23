@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: notehub-backend
+    env: docker
+    plan: free # or standard if you want persistent disks on Render
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    envVars:
+      - key: DB_PATH
+        value: /app/data/notehub.db
+      - key: SECRET_KEY
+        generateValue: true
+    disk:
+      name: notehub-data
+      mountPath: /app/data
+      sizeGB: 1

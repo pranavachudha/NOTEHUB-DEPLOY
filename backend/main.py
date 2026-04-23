@@ -38,7 +38,8 @@ security = HTTPBearer()
 # ── Database ──────────────────────────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect("notehub.db")
+    db_path = os.getenv("DB_PATH", "notehub.db")
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
