@@ -49,6 +49,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
+            username TEXT UNIQUE,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             created_at TEXT NOT NULL
@@ -87,6 +88,11 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """)
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN username TEXT UNIQUE")
+    except sqlite3.OperationalError:
+        pass
+        
     try:
         conn.execute("ALTER TABLE channel_members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
     except sqlite3.OperationalError:
@@ -168,6 +174,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) 
 
 class SignupRequest(BaseModel):
     name: str
+    username: str
     email: str
     password: str
 
@@ -178,6 +185,7 @@ class LoginRequest(BaseModel):
 class UserResponse(BaseModel):
     id: str
     name: str
+    username: str
     email: str
     created_at: str
 
@@ -203,22 +211,30 @@ class ReorderRequest(BaseModel):
 @app.post("/auth/signup")
 def signup(body: SignupRequest):
     conn = get_db()
-    existing = conn.execute("SELECT id FROM users WHERE email = ?", (body.email,)).fetchone()
-    if existing:
+    
+    # Check email
+    existing_email = conn.execute("SELECT id FROM users WHERE email = ?", (body.email,)).fetchone()
+    if existing_email:
         conn.close()
         raise HTTPException(status_code=400, detail="Email already registered")
+        
+    # Check username
+    existing_user = conn.execute("SELECT id FROM users WHERE username = ?", (body.username.lower(),)).fetchone()
+    if existing_user:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Username already taken")
     
     user_id = str(uuid.uuid4())
     created_at = datetime.datetime.utcnow().isoformat()
     conn.execute(
-        "INSERT INTO users (id, name, email, password_hash, created_at) VALUES (?, ?, ?, ?, ?)",
-        (user_id, body.name, body.email, hash_password(body.password), created_at)
+        "INSERT INTO users (id, name, username, email, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, body.name, body.username.lower(), body.email, hash_password(body.password), created_at)
     )
     conn.commit()
     conn.close()
     
     token = create_token(user_id)
-    return {"token": token, "user": {"id": user_id, "name": body.name, "email": body.email, "created_at": created_at}}
+    return {"token": token, "user": {"id": user_id, "name": body.name, "username": body.username.lower(), "email": body.email, "created_at": created_at}}
 
 @app.post("/auth/login")
 def login(body: LoginRequest):
