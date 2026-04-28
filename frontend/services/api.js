@@ -1,8 +1,11 @@
+import { Platform } from "react-native";
 import axios from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // For production, set EXPO_PUBLIC_API_URL in your environment or .env file
-export const BASE_URL = process.env.EXPO_PUBLIC_API_URL || "http://10.28.18.177:8000";
+const DEFAULT_IP = "172.29.4.25"; // Change this to your local IP for mobile
+export const BASE_URL = process.env.EXPO_PUBLIC_API_URL || 
+  (Platform.OS === "web" ? "http://localhost:8000" : `http://${DEFAULT_IP}:8000`);
 
 const api = axios.create({
   baseURL: BASE_URL,

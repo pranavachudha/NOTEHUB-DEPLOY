@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useRouter } from "expo-router";
 import { useAuth } from "../../context/AuthContext";
 import { StatusBar } from "expo-status-bar";
+import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function LoginScreen() {
@@ -11,12 +12,14 @@ export default function LoginScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   async function handleLogin() {
-    if (!email.trim() || !password.trim()) { Alert.alert("Missing fields", "Please fill in all fields."); return; }
+    setError("");
+    if (!email.trim() || !password.trim()) { setError("Please fill in all fields."); return; }
     setLoading(true);
     try { await login(email.trim().toLowerCase(), password); }
-    catch (err) { Alert.alert("Login failed", err.response?.data?.detail || "Something went wrong."); }
+    catch (err) { setError(err.response?.data?.detail || "Login failed. Check your credentials."); }
     finally { setLoading(false); }
   }
 
@@ -27,6 +30,14 @@ export default function LoginScreen() {
         <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           <Text style={s.logo}>NoteHub</Text>
           <Text style={s.tagline}>Capture knowledge, anywhere.</Text>
+
+          {error ? (
+            <View style={s.errorBox}>
+              <Ionicons name="alert-circle" size={16} color="#E85D75" />
+              <Text style={s.errorText}>{error}</Text>
+            </View>
+          ) : null}
+
           <View style={s.divider} />
           <Text style={s.label}>Email</Text>
           <TextInput style={s.input} placeholder="student@university.edu" placeholderTextColor="#4a4460" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
@@ -60,4 +71,6 @@ const s = StyleSheet.create({
   footer: { flexDirection: "row", justifyContent: "center", marginTop: 40 },
   footerText: { color: "#4a4460", fontSize: 14 },
   footerLink: { color: "#F5A623", fontSize: 14, fontWeight: "600" },
+  errorBox: { flexDirection: "row", alignItems: "center", backgroundColor: "rgba(232, 93, 117, 0.1)", padding: 12, borderRadius: 10, marginTop: 20, gap: 8, borderWidth: 1, borderColor: "rgba(232, 93, 117, 0.2)" },
+  errorText: { color: "#E85D75", fontSize: 13, flex: 1, fontWeight: "500" },
 });

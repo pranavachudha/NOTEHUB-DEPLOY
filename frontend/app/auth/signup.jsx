@@ -3,24 +3,34 @@ import { useState } from "react";
 import { useRouter } from "expo-router";
 import { useAuth } from "../../context/AuthContext";
 import { StatusBar } from "expo-status-bar";
+import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function SignupScreen() {
   const router = useRouter();
   const { signup } = useAuth();
   const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   async function handleSignup() {
-    if (!name.trim() || !email.trim() || !password.trim()) { Alert.alert("Missing fields", "Please fill in all fields."); return; }
-    if (password !== confirm) { Alert.alert("Mismatch", "Passwords do not match."); return; }
-    if (password.length < 6) { Alert.alert("Weak password", "At least 6 characters required."); return; }
+    setError("");
+    if (!name.trim() || !username.trim() || !email.trim() || !password.trim()) { setError("Please fill in all fields."); return; }
+    if (password !== confirm) { setError("Passwords do not match."); return; }
+    
+    const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]).{6,}$/;
+    if (!passwordRegex.test(password)) {
+      setError("Password must be at least 6 characters and include a capital letter, a number, and a symbol.");
+      return;
+    }
+
     setLoading(true);
-    try { await signup(name.trim(), email.trim().toLowerCase(), password); }
-    catch (err) { Alert.alert("Signup failed", err.response?.data?.detail || "Something went wrong."); }
+    try { await signup(name.trim(), username.trim().toLowerCase(), email.trim().toLowerCase(), password); }
+    catch (err) { setError(err.response?.data?.detail || "Signup failed. Please try again."); }
     finally { setLoading(false); }
   }
 
@@ -34,9 +44,21 @@ export default function SignupScreen() {
           </TouchableOpacity>
           <Text style={s.title}>Create account</Text>
           <Text style={s.subtitle}>Start capturing your notes today</Text>
+          
+          {error ? (
+            <View style={s.errorBox}>
+              <Ionicons name="alert-circle" size={16} color="#E85D75" />
+              <Text style={s.errorText}>{error}</Text>
+            </View>
+          ) : null}
+
           <View style={s.divider} />
           <Text style={s.label}>Full Name</Text>
           <TextInput style={s.input} placeholder="Ada Lovelace" placeholderTextColor="#4a4460" value={name} onChangeText={setName} />
+          
+          <Text style={[s.label, { marginTop: 16 }]}>Username</Text>
+          <TextInput style={s.input} placeholder="ada.dev" placeholderTextColor="#4a4460" value={username} onChangeText={setUsername} autoCapitalize="none" />
+          
           <Text style={[s.label, { marginTop: 16 }]}>Email</Text>
           <TextInput style={s.input} placeholder="ada@university.edu" placeholderTextColor="#4a4460" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
           <Text style={[s.label, { marginTop: 16 }]}>Password</Text>
@@ -71,4 +93,6 @@ const s = StyleSheet.create({
   footer: { flexDirection: "row", justifyContent: "center", marginTop: 32 },
   footerText: { color: "#4a4460", fontSize: 14 },
   footerLink: { color: "#F5A623", fontSize: 14, fontWeight: "600" },
+  errorBox: { flexDirection: "row", alignItems: "center", backgroundColor: "rgba(232, 93, 117, 0.1)", padding: 12, borderRadius: 10, marginTop: 20, gap: 8, borderWidth: 1, borderColor: "rgba(232, 93, 117, 0.2)" },
+  errorText: { color: "#E85D75", fontSize: 13, flex: 1, fontWeight: "500" },
 });
