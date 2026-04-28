@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+import json
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
@@ -64,6 +65,7 @@ def init_db():
             pdf_base64 TEXT,
             image_count INTEGER DEFAULT 0,
             created_at TEXT NOT NULL,
+            is_channel_copy INTEGER DEFAULT 0,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """)
@@ -90,6 +92,11 @@ def init_db():
     """)
     try:
         conn.execute("ALTER TABLE users ADD COLUMN username TEXT UNIQUE")
+    except sqlite3.OperationalError:
+        pass
+        
+    try:
+        conn.execute("ALTER TABLE documents ADD COLUMN is_channel_copy INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass
         
@@ -294,6 +301,45 @@ def preprocess_image(image_bytes: bytes) -> bytes:
     return buf.tobytes()
 
 
+def warp_perspective(image_bytes: bytes, points: List[dict]) -> bytes:
+    """
+    Performs perspective transformation (deskewing) on an image based on 4 points.
+    points: List of 4 dicts [{"x": 0.1, "y": 0.1}, ...] in normalized coordinates (0-1).
+    Expected order: Top-Left, Top-Right, Bottom-Right, Bottom-Left
+    """
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None: return image_bytes
+        h, w = img.shape[:2]
+
+        src_pts = np.float32([[p["x"] * w, p["y"] * h] for p in points])
+        
+        width_a = np.sqrt(((src_pts[2][0] - src_pts[3][0]) ** 2) + ((src_pts[2][1] - src_pts[3][1]) ** 2))
+        width_b = np.sqrt(((src_pts[1][0] - src_pts[0][0]) ** 2) + ((src_pts[1][1] - src_pts[0][1]) ** 2))
+        max_width = max(int(width_a), int(width_b))
+
+        height_a = np.sqrt(((src_pts[1][0] - src_pts[2][0]) ** 2) + ((src_pts[1][1] - src_pts[2][1]) ** 2))
+        height_b = np.sqrt(((src_pts[0][0] - src_pts[3][0]) ** 2) + ((src_pts[0][1] - src_pts[3][1]) ** 2))
+        max_height = max(int(height_a), int(height_b))
+
+        dst_pts = np.float32([
+            [0, 0],
+            [max_width - 1, 0],
+            [max_width - 1, max_height - 1],
+            [0, max_height - 1]
+        ])
+
+        matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        warped = cv2.warpPerspective(img, matrix, (max_width, max_height))
+
+        success, buf = cv2.imencode(".jpg", warped, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        return buf.tobytes() if success else image_bytes
+    except Exception as e:
+        print(f"Warp error: {e}")
+        return image_bytes
+
+
 def extract_text_from_image(image_bytes: bytes) -> str:
     try:
         processed = preprocess_image(image_bytes)
@@ -485,12 +531,20 @@ async def create_document(request: Request, user_id: str = Depends(verify_token)
 
     # Collect all image_N fields in order
     image_files = []
+    crops = []
     i = 0
     while True:
         field = form.get(f"image_{i}")
         if field is None:
             break
         image_files.append(field)
+        
+        crop_data = form.get(f"crop_{i}")
+        if crop_data:
+            try: crops.append(json.loads(crop_data))
+            except: crops.append(None)
+        else:
+            crops.append(None)
         i += 1
 
     if not image_files:
@@ -499,8 +553,11 @@ async def create_document(request: Request, user_id: str = Depends(verify_token)
     pages = []
     all_text = []
 
-    for img_file in image_files:
+    for idx, img_file in enumerate(image_files):
         img_bytes = await img_file.read()
+        if crops[idx]:
+            img_bytes = warp_perspective(img_bytes, crops[idx])
+        
         text = extract_text_from_image(img_bytes)
         pages.append({"image_bytes": img_bytes, "text": text})
         all_text.append(text)
@@ -541,7 +598,7 @@ async def create_document(request: Request, user_id: str = Depends(verify_token)
 def list_documents(user_id: str = Depends(verify_token)):
     conn = get_db()
     docs = conn.execute(
-        "SELECT id, title, extracted_text, image_count, created_at FROM documents WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT id, title, extracted_text, image_count, created_at FROM documents WHERE user_id = ? AND is_channel_copy = 0 ORDER BY created_at DESC",
         (user_id,)
     ).fetchall()
     conn.close()
@@ -587,11 +644,19 @@ async def append_document_pages(doc_id: str, request: Request, user_id: str = De
     
     # Collect new images
     image_files = []
+    crops = []
     i = 0
     while True:
         field = form.get(f"image_{i}")
         if field is None: break
         image_files.append(field)
+        
+        crop_data = form.get(f"crop_{i}")
+        if crop_data:
+            try: crops.append(json.loads(crop_data))
+            except: crops.append(None)
+        else:
+            crops.append(None)
         i += 1
 
     if not image_files:
@@ -614,8 +679,11 @@ async def append_document_pages(doc_id: str, request: Request, user_id: str = De
     
     # Process new images
     new_page_start_idx = len(pages)
-    for img_file in image_files:
+    for idx, img_file in enumerate(image_files):
         img_bytes = await img_file.read()
+        if crops[idx]:
+            img_bytes = warp_perspective(img_bytes, crops[idx])
+            
         text = extract_text_from_image(img_bytes)
         pages.append({"image_bytes": img_bytes, "text": text})
         all_text.append(text)
@@ -764,15 +832,36 @@ def submit_note(channel_id: str, body: SubmitNoteRequest, user_id: str = Depends
         conn.close()
         raise HTTPException(status_code=403, detail="Must join channel first")
 
-    doc = conn.execute("SELECT 1 FROM documents WHERE id = ? AND user_id = ?", (body.document_id, user_id)).fetchone()
+    doc = conn.execute("SELECT * FROM documents WHERE id = ? AND user_id = ?", (body.document_id, user_id)).fetchone()
     if not doc:
         conn.close()
         raise HTTPException(status_code=404, detail="Document not found")
 
+    # Create a separate copy of the document for the channel
+    new_doc_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO documents (id, user_id, title, extracted_text, pdf_base64, image_count, created_at, is_channel_copy) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+        (new_doc_id, user_id, doc["title"], doc["extracted_text"], doc["pdf_base64"], doc["image_count"], doc["created_at"])
+    )
+    
+    # Copy all associated pages
+    pages = conn.execute("SELECT * FROM document_pages WHERE document_id = ?", (body.document_id,)).fetchall()
+    for p in pages:
+        new_page_id = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO document_pages (id, document_id, page_number, image_bytes, extracted_text) VALUES (?, ?, ?, ?, ?)",
+            (new_page_id, new_doc_id, p["page_number"], p["image_bytes"], p["extracted_text"])
+        )
+
+    # Get max order_index to append at the bottom
+    res = conn.execute("SELECT MAX(order_index) FROM channel_notes WHERE channel_id = ?", (channel_id,)).fetchone()
+    max_idx = res[0] if res and res[0] is not None else -1
+    new_idx = max_idx + 1
+
     sub_id = str(uuid.uuid4())
     conn.execute(
-        "INSERT INTO channel_notes (id, channel_id, document_id, status, submitted_by, submitted_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (sub_id, channel_id, body.document_id, "pending", user_id, datetime.datetime.utcnow().isoformat())
+        "INSERT INTO channel_notes (id, channel_id, document_id, status, submitted_by, submitted_at, order_index) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (sub_id, channel_id, new_doc_id, "pending", user_id, datetime.datetime.utcnow().isoformat(), new_idx)
     )
     conn.commit()
     conn.close()
