@@ -5,7 +5,7 @@ import {
 } from "react-native";
 import { TouchableOpacity as GHTouchableOpacity, GestureHandlerRootView } from "react-native-gesture-handler";
 import DraggableFlatList, { ScaleDecorator } from "react-native-draggable-flatlist";
-import { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, memo } from "react";
 import { useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -46,6 +46,10 @@ export default function ChannelsScreen() {
   const [modifiedNotes, setModifiedNotes] = useState({}); // submission_id -> text
   const [savingBulk, setSavingBulk] = useState(false);
   const [downloadingPDF, setDownloadingPDF] = useState(false);
+  const [isEditingChannel, setIsEditingChannel] = useState(false);
+  const [editChannelName, setEditChannelName] = useState("");
+  const [editChannelDesc, setEditChannelDesc] = useState("");
+  const [savingChannelEdit, setSavingChannelEdit] = useState(false);
 
   const { show, element } = useAppAlert();
 
@@ -140,6 +144,19 @@ export default function ChannelsScreen() {
       show("Saved", "All changes saved successfully.");
     } catch { show("Error", "Could not save changes."); }
     finally { setSavingBulk(false); }
+  }
+
+  async function saveChannelEdit() {
+    if (!editChannelName.trim()) return show("Error", "Channel name is required.");
+    setSavingChannelEdit(true);
+    try {
+      await api.put(`/channels/${selectedChannel.id}`, { name: editChannelName.trim(), description: editChannelDesc });
+      setSelectedChannel(prev => ({ ...prev, name: editChannelName.trim(), description: editChannelDesc }));
+      loadChannels(true);
+      setIsEditingChannel(false);
+      show("Saved", "Channel details updated.");
+    } catch { show("Error", "Could not update channel."); }
+    finally { setSavingChannelEdit(false); }
   }
 
   async function downloadChannelPDF() {
@@ -274,6 +291,42 @@ export default function ChannelsScreen() {
     } catch { show("Error", "Failed to reject."); }
   }
 
+  async function handleDeleteNote(submissionId) {
+    show("Delete Note", "Are you sure you want to delete this note from the channel?", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: async () => {
+        try {
+          await api.delete(`/channels/${selectedChannel.id}/notes/${submissionId}`);
+          setChannelNotes(prev => ({
+            ...prev,
+            approved: prev.approved.filter(n => n.submission_id !== submissionId)
+          }));
+          show("Deleted", "Note removed from the channel.");
+        } catch { show("Error", "Could not delete note."); }
+      }}
+    ]);
+  }
+
+  const renderNoteItem = useCallback(({ item, drag, isActive }) => {
+    return (
+      <NoteItem 
+        note={item} 
+        drag={drag} 
+        isActive={isActive} 
+        isReordering={isReordering}
+        isEditingAll={isEditingAll}
+        onDelete={handleDeleteNote}
+        onPress={() => {
+          setSelectedNote(item);
+          setShowNoteModal(true);
+        }}
+        selectedChannel={selectedChannel}
+        modifiedNotes={modifiedNotes}
+        setModifiedNotes={setModifiedNotes}
+      />
+    );
+  }, [isReordering, isEditingAll, selectedChannel, handleDeleteNote, modifiedNotes, setModifiedNotes]);
+
   if (loading) {
     return (
       <SafeAreaView style={[s.container, { justifyContent: "center", alignItems: "center" }]}>
@@ -340,15 +393,53 @@ export default function ChannelsScreen() {
           <SafeAreaView style={s.container}>
             {element}
             <View style={s.modalHeader}>
-              <TouchableOpacity onPress={() => setSelectedChannel(null)} style={{ marginRight: 12 }}><Ionicons name="arrow-back" size={24} color="#F5A623" /></TouchableOpacity>
+              <TouchableOpacity onPress={() => { setSelectedChannel(null); setIsEditingChannel(false); }} style={{ marginRight: 12 }}><Ionicons name="arrow-back" size={24} color="#F5A623" /></TouchableOpacity>
               <View style={{ flex: 1 }}>
-                <Text style={s.modalTitle} numberOfLines={1}>{selectedChannel.name}</Text>
-                <Text style={s.memberEmail} numberOfLines={1}>{selectedChannel.description}</Text>
+                {isEditingChannel ? (
+                  <TextInput 
+                    style={[s.modalTitle, s.editInput]} 
+                    value={editChannelName} 
+                    onChangeText={setEditChannelName} 
+                    placeholder="Channel Name"
+                    placeholderTextColor="#4a4460"
+                  />
+                ) : (
+                  <>
+                    <Text style={s.modalTitle} numberOfLines={1}>{selectedChannel.name}</Text>
+                    <Text style={s.memberEmail} numberOfLines={1}>{selectedChannel.description}</Text>
+                  </>
+                )}
               </View>
-              <TouchableOpacity onPress={downloadChannelPDF} disabled={downloadingPDF} style={{ padding: 8 }}>
+              
+              {selectedChannel.is_admin && (
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  {isEditingChannel && (
+                    <TouchableOpacity onPress={() => setIsEditingChannel(false)} style={{ padding: 8 }}>
+                      <Ionicons name="close-circle-outline" size={26} color="#E85D75" />
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity 
+                    onPress={() => {
+                      if (isEditingChannel) saveChannelEdit();
+                      else {
+                        setEditChannelName(selectedChannel.name);
+                        setEditChannelDesc(selectedChannel.description || "");
+                        setIsEditingChannel(true);
+                      }
+                    }} 
+                    style={{ padding: 8 }}
+                  >
+                    {savingChannelEdit ? <ActivityIndicator size="small" color="#F5A623" /> : (
+                      <Ionicons name={isEditingChannel ? "checkmark-circle" : "pencil"} size={24} color="#F5A623" />
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              <TouchableOpacity onPress={downloadChannelPDF} disabled={downloadingPDF || isEditingChannel} style={{ padding: 8, opacity: isEditingChannel ? 0.3 : 1 }}>
                 {downloadingPDF ? <ActivityIndicator size="small" color="#F5A623" /> : <Ionicons name="download-outline" size={24} color="#F5A623" />}
               </TouchableOpacity>
-              <TouchableOpacity onPress={leaveOrDeleteChannel} style={{ padding: 8 }}>
+              <TouchableOpacity onPress={leaveOrDeleteChannel} disabled={isEditingChannel} style={{ padding: 8, opacity: isEditingChannel ? 0.3 : 1 }}>
                 <Ionicons name={selectedChannel.is_admin ? "trash-outline" : "log-out-outline"} size={24} color="#E85D75" />
               </TouchableOpacity>
             </View>
@@ -410,85 +501,15 @@ export default function ChannelsScreen() {
                         LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                         setChannelNotes(prev => ({ ...prev, approved: data }));
                       }}
+                      initialNumToRender={8}
+                      maxToRenderPerBatch={10}
+                      windowSize={5}
+                      removeClippedSubviews={true}
                       onEndReached={isReordering ? null : loadMoreNotes}
                       onEndReachedThreshold={0.5}
                       ListFooterComponent={loadingMore ? <ActivityIndicator color="#F5A623" style={{ marginVertical: 10 }} /> : null}
                       contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
-                      renderItem={({ item: note, drag, isActive, index }) => {
-                        return (
-                          <ScaleDecorator activeScale={1.05}>
-                            <View 
-                              style={{ 
-                                marginBottom: isReordering ? 16 : 0, 
-                                paddingVertical: isReordering ? 16 : 20,
-                                backgroundColor: isReordering ? "#1E1A4A" : "transparent", 
-                                paddingHorizontal: isReordering ? 16 : 0, 
-                                borderRadius: 12, 
-                                borderWidth: isReordering ? 2 : 0, 
-                                borderBottomWidth: isReordering ? 2 : 1,
-                                borderColor: isActive ? "#F5A623" : "#2D266B",
-                                borderBottomColor: isReordering ? (isActive ? "#F5A623" : "#2D266B") : "#1E1A4A",
-                                flexDirection: "row",
-                                alignItems: "center",
-                                elevation: isActive ? 10 : 0,
-                                shadowColor: "#000",
-                                shadowOffset: { width: 0, height: 5 },
-                                shadowOpacity: isActive ? 0.3 : 0,
-                                shadowRadius: 10,
-                              }}
-                            >
-                              {isReordering && (
-                                <GHTouchableOpacity 
-                                  onLongPress={drag} 
-                                  delayLongPress={100}
-                                  style={{ marginRight: 12, padding: 10, backgroundColor: isActive ? "rgba(0,0,0,0.1)" : "#2D266B", borderRadius: 8 }}
-                                >
-                                  <Ionicons name="menu" size={24} color={isActive ? "#0A0A0F" : "#F5A623"} />
-                                </GHTouchableOpacity>
-                              )}
-
-                              <View style={{ flex: 1 }}>
-                                {isEditingAll ? (
-                                  <View style={{ gap: 8 }}>
-                                    <TextInput
-                                      placeholder="Heading"
-                                      placeholderTextColor="#4a4460"
-                                      style={{ color: "#F5A623", fontSize: 18, fontWeight: "bold", backgroundColor: "#120F2E", padding: 8, borderRadius: 8 }}
-                                      value={modifiedNotes[note.submission_id]?.heading !== undefined ? modifiedNotes[note.submission_id].heading : (note.heading || "")}
-                                      onChangeText={(text) => setModifiedNotes(prev => ({ ...prev, [note.submission_id]: { ...(prev[note.submission_id] || {}), heading: text } }))}
-                                    />
-                                    <TextInput
-                                      placeholder="Subheading"
-                                      placeholderTextColor="#4a4460"
-                                      style={{ color: "#7A6DC4", fontSize: 14, backgroundColor: "#120F2E", padding: 8, borderRadius: 8 }}
-                                      value={modifiedNotes[note.submission_id]?.subheading !== undefined ? modifiedNotes[note.submission_id].subheading : (note.subheading || "")}
-                                      onChangeText={(text) => setModifiedNotes(prev => ({ ...prev, [note.submission_id]: { ...(prev[note.submission_id] || {}), subheading: text } }))}
-                                    />
-                                    <TextInput
-                                      placeholder="Content"
-                                      placeholderTextColor="#4a4460"
-                                      style={{ color: "#F8F6F0", fontSize: 16, lineHeight: 26, backgroundColor: "#120F2E", padding: 8, borderRadius: 8 }}
-                                      value={modifiedNotes[note.submission_id]?.text !== undefined ? modifiedNotes[note.submission_id].text : note.extracted_text}
-                                      onChangeText={(text) => setModifiedNotes(prev => ({ ...prev, [note.submission_id]: { ...(prev[note.submission_id] || {}), text: text } }))}
-                                      multiline
-                                    />
-                                  </View>
-                                ) : (
-                                  <View>
-                                    {note.heading && <Text style={{ color: "#F5A623", fontSize: 18, fontWeight: "bold", marginBottom: 2 }}>{note.heading}</Text>}
-                                    {note.subheading && <Text style={{ color: "#7A6DC4", fontSize: 14, marginBottom: 8 }}>{note.subheading}</Text>}
-                                    <Text style={{ color: "#F8F6F0", fontSize: 16, lineHeight: 26 }} numberOfLines={isReordering ? 3 : undefined}>
-                                      {note.extracted_text}
-                                    </Text>
-                                  </View>
-                                )}
-                                <Text style={{ color: "#7A6DC4", fontSize: 12, marginTop: 4 }}>By {note.author_name}</Text>
-                              </View>
-
-                            </View>
-                          </ScaleDecorator>
-                        );
-                      }}
+                      renderItem={renderNoteItem}
                       ListEmptyComponent={<Text style={s.emptyState}>Nothing to see here.</Text>}
                     />
                   </GestureHandlerRootView>
@@ -622,16 +643,15 @@ export default function ChannelsScreen() {
 
 function CreateChannelModal({ visible, onClose, onCreated, showAlert }) {
   const [name, setName] = useState("");
-  const [desc, setDesc] = useState("");
   const [saving, setSaving] = useState(false);
 
   async function handleCreate() {
     if (!name.trim()) return showAlert("Error", "Channel name is required.");
     setSaving(true);
     try {
-      await api.post("/channels/create", { name, description: desc });
+      await api.post("/channels/create", { name });
       onCreated();
-      setName(""); setDesc("");
+      setName("");
     } catch { showAlert("Error", "Could not create channel."); }
     finally { setSaving(false); }
   }
@@ -642,7 +662,6 @@ function CreateChannelModal({ visible, onClose, onCreated, showAlert }) {
         <View style={s.createModal}>
           <Text style={s.createModalTitle}>Create Channel</Text>
           <TextInput style={s.input} placeholder="Channel Name (e.g. CS 101)" placeholderTextColor="#4a4460" value={name} onChangeText={setName} />
-          <TextInput style={[s.input, { height: 80 }]} placeholder="Description" placeholderTextColor="#4a4460" value={desc} onChangeText={setDesc} multiline />
           <View style={s.modalActions}>
             <TouchableOpacity onPress={onClose} style={s.cancelBtn}><Text style={s.cancelText}>Cancel</Text></TouchableOpacity>
             <TouchableOpacity onPress={handleCreate} style={s.saveBtn} disabled={saving}>
@@ -674,6 +693,7 @@ const s = StyleSheet.create({
   viewText: { color: "#F5A623", fontSize: 13, fontWeight: "600" },
   modalHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: "#1E1A4A" },
   modalTitle: { color: "#F8F6F0", fontWeight: "bold", fontSize: 18, flex: 1 },
+  editInput: { backgroundColor: "#120F2E", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: "#2D266B", color: "#F8F6F0" },
   tabs: { flexDirection: "row", borderBottomWidth: 1, borderBottomColor: "#1E1A4A" },
   tab: { flex: 1, paddingVertical: 14, alignItems: "center", borderBottomWidth: 2, borderBottomColor: "transparent" },
   tabActive: { borderBottomColor: "#F5A623" },
@@ -720,4 +740,85 @@ const s = StyleSheet.create({
   searchRow: { flexDirection: "row", alignItems: "center", paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#1E1A4A" },
   sendInviteBtn: { backgroundColor: "#F5A623", paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8 },
   sendInviteText: { color: "#0A0A0F", fontWeight: "bold", fontSize: 12 },
+});
+
+const NoteItem = memo(({ note, drag, isActive, isReordering, isEditingAll, onDelete, onPress, selectedChannel, modifiedNotes, setModifiedNotes }) => {
+  return (
+    <ScaleDecorator>
+      <TouchableOpacity
+        onLongPress={drag}
+        disabled={!isReordering}
+        onPress={onPress}
+        style={[
+          s.card,
+          {
+            backgroundColor: isActive ? "#3D348B" : "#1E1A4A",
+            borderColor: isActive ? "#F5A623" : "#2D266B",
+            borderBottomColor: isReordering ? (isActive ? "#F5A623" : "#2D266B") : "#1E1A4A",
+            flexDirection: "row",
+            alignItems: "flex-start",
+            elevation: isActive ? 10 : 0,
+            shadowColor: "#000",
+            shadowOffset: { width: 0, height: 5 },
+            shadowOpacity: isActive ? 0.3 : 0,
+            shadowRadius: 10,
+            paddingVertical: 12,
+            paddingHorizontal: 16,
+            marginVertical: isReordering ? 4 : 0,
+            borderRadius: isReordering ? 12 : 0,
+          }
+        ]}
+      >
+        {isReordering && (
+          <View style={{ marginRight: 12, padding: 10, backgroundColor: isActive ? "rgba(0,0,0,0.1)" : "#2D266B", borderRadius: 8 }}>
+            <Ionicons name="menu" size={20} color={isActive ? "#F5A623" : "#7A6DC4"} />
+          </View>
+        )}
+
+        <View style={{ flex: 1 }}>
+          {isEditingAll ? (
+            <View style={{ gap: 8 }}>
+              <TextInput
+                placeholder="Heading"
+                placeholderTextColor="#4a4460"
+                style={{ color: "#F5A623", fontSize: 18, fontWeight: "bold", backgroundColor: "#120F2E", padding: 8, borderRadius: 8 }}
+                value={modifiedNotes[note.submission_id]?.heading !== undefined ? modifiedNotes[note.submission_id].heading : (note.heading || "")}
+                onChangeText={(text) => setModifiedNotes(prev => ({ ...prev, [note.submission_id]: { ...(prev[note.submission_id] || {}), heading: text } }))}
+              />
+              <TextInput
+                placeholder="Subheading"
+                placeholderTextColor="#4a4460"
+                style={{ color: "#7A6DC4", fontSize: 14, backgroundColor: "#120F2E", padding: 8, borderRadius: 8 }}
+                value={modifiedNotes[note.submission_id]?.subheading !== undefined ? modifiedNotes[note.submission_id].subheading : (note.subheading || "")}
+                onChangeText={(text) => setModifiedNotes(prev => ({ ...prev, [note.submission_id]: { ...(prev[note.submission_id] || {}), subheading: text } }))}
+              />
+              <TextInput
+                placeholder="Content"
+                placeholderTextColor="#4a4460"
+                style={{ color: "#F8F6F0", fontSize: 16, lineHeight: 26, backgroundColor: "#120F2E", padding: 8, borderRadius: 8 }}
+                value={modifiedNotes[note.submission_id]?.text !== undefined ? modifiedNotes[note.submission_id].text : note.extracted_text}
+                onChangeText={(text) => setModifiedNotes(prev => ({ ...prev, [note.submission_id]: { ...(prev[note.submission_id] || {}), text: text } }))}
+                multiline
+              />
+            </View>
+          ) : (
+            <View>
+              {note.heading && <Text style={{ color: "#F5A623", fontSize: 18, fontWeight: "bold", marginBottom: 2 }}>{note.heading}</Text>}
+              {note.subheading && <Text style={{ color: "#7A6DC4", fontSize: 14, marginBottom: 8 }}>{note.subheading}</Text>}
+              <Text style={{ color: "#F8F6F0", fontSize: 16, lineHeight: 26 }} numberOfLines={isReordering ? 3 : undefined}>
+                {note.extracted_text}
+              </Text>
+            </View>
+          )}
+          <Text style={{ color: "#7A6DC4", fontSize: 12, marginTop: 4 }}>By {note.author_name}</Text>
+        </View>
+
+        {(selectedChannel.is_admin || selectedChannel.role === 'moderator') && isEditingAll && !isReordering && (
+          <TouchableOpacity onPress={() => onDelete(note.submission_id)} style={{ padding: 8 }}>
+            <Ionicons name="trash-outline" size={20} color="#E85D75" />
+          </TouchableOpacity>
+        )}
+      </TouchableOpacity>
+    </ScaleDecorator>
+  );
 });

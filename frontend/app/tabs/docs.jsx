@@ -154,6 +154,10 @@ export default function DocsScreen() {
           keyExtractor={item => item.id}
           contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 24 }}
           ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
+          initialNumToRender={10}
+          maxToRenderPerBatch={10}
+          windowSize={5}
+          removeClippedSubviews={true}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); loadDocs(true); }} tintColor="#F5A623" />}
           renderItem={({ item }) => (
             <TouchableOpacity onPress={() => setSelectedDoc(item)} style={s.card}>
@@ -162,6 +166,17 @@ export default function DocsScreen() {
                   <Ionicons name="document-text" size={20} color="#F5A623" />
                 </View>
                 <Text style={s.cardTitle} numberOfLines={2}>{item.title}</Text>
+                <TouchableOpacity 
+                  onPress={() => {
+                    setSelectedDoc(item);
+                    setEditTitle(item.title);
+                    setEditContent(item.extracted_text || "");
+                    setIsEditing(true);
+                  }} 
+                  style={s.editBtn}
+                >
+                  <Ionicons name="pencil" size={18} color="#7A6DC4" />
+                </TouchableOpacity>
                 <TouchableOpacity onPress={() => deleteDoc(item)} style={s.deleteBtn}>
                   <Ionicons name="trash-outline" size={18} color="#E85D75" />
                 </TouchableOpacity>
@@ -204,13 +219,14 @@ export default function DocsScreen() {
               )}
 
               {isEditing ? (
-                <TouchableOpacity onPress={saveDocEdit} disabled={savingEdit} style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-                  {savingEdit ? <ActivityIndicator size="small" color="#F5A623" /> : (
-                    <>
-                      <Text style={{ color: "#F5A623", fontWeight: "bold" }}>Save</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                  <TouchableOpacity onPress={() => setIsEditing(false)} style={{ paddingHorizontal: 12, paddingVertical: 6 }}>
+                    <Text style={{ color: "#7A6DC4" }}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={saveDocEdit} disabled={savingEdit} style={{ backgroundColor: "#F5A623", paddingHorizontal: 16, paddingVertical: 6, borderRadius: 8 }}>
+                    {savingEdit ? <ActivityIndicator size="small" color="#0A0A0F" /> : <Text style={{ color: "#0A0A0F", fontWeight: "bold" }}>Save</Text>}
+                  </TouchableOpacity>
+                </View>
               ) : (
                 <>
                   <TouchableOpacity 
@@ -309,6 +325,7 @@ const s = StyleSheet.create({
   cardHeader: { flexDirection: "row", alignItems: "flex-start", marginBottom: 12 },
   cardIcon: { width: 36, height: 36, borderRadius: 10, backgroundColor: "#120F2E", alignItems: "center", justifyContent: "center", marginRight: 10 },
   cardTitle: { color: "#F8F6F0", fontWeight: "bold", fontSize: 15, flex: 1, lineHeight: 21 },
+  editBtn: { padding: 4, marginLeft: 8 },
   deleteBtn: { padding: 4, marginLeft: 8 },
   chips: { flexDirection: "row", gap: 6, flexWrap: "wrap" },
   preview: { color: "#7A6DC4", fontSize: 13, marginTop: 10, lineHeight: 20 },

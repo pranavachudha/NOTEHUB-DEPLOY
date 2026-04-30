@@ -29,7 +29,15 @@ export default function SignupScreen() {
     }
 
     setLoading(true);
-    try { await signup(name.trim(), username.trim().toLowerCase(), email.trim().toLowerCase(), password); }
+    try { 
+      const res = await signup(name.trim(), username.trim().toLowerCase(), email.trim().toLowerCase(), password); 
+      if (res.is_verified) {
+        Alert.alert("Success", "Account created and verified! Please log in.");
+        router.replace("/auth/login");
+      } else {
+        router.push({ pathname: "/auth/verify", params: { email: email.trim().toLowerCase(), otp_debug: res.otp_debug } });
+      }
+    }
     catch (err) { setError(err.response?.data?.detail || "Signup failed. Please try again."); }
     finally { setLoading(false); }
   }

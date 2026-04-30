@@ -11,6 +11,9 @@ import datetime
 import base64
 import os
 import uuid
+from dotenv import load_dotenv
+
+load_dotenv()
 import cv2
 import numpy as np
 from PIL import Image
@@ -32,8 +35,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SECRET_KEY = "notehub-super-secret-key-change-in-production"
+SECRET_KEY = os.getenv("SECRET_KEY", "notehub-dev-secret-key-do-not-use-in-prod")
 ALGORITHM = "HS256"
+PASSWORD_SALT = "notehub-salt-v1" # Simple salt for sha256
 security = HTTPBearer()
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -53,6 +57,8 @@ def init_db():
             username TEXT UNIQUE,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
+            is_verified INTEGER DEFAULT 0,
+            otp_code TEXT,
             created_at TEXT NOT NULL
         )
     """)
@@ -90,20 +96,23 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """)
-    try:
-        conn.execute("ALTER TABLE users ADD COLUMN username TEXT UNIQUE")
-    except sqlite3.OperationalError:
-        pass
-        
-    try:
-        conn.execute("ALTER TABLE documents ADD COLUMN is_channel_copy INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-        
-    try:
-        conn.execute("ALTER TABLE channel_members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
-    except sqlite3.OperationalError:
-        pass
+    # Migrations
+    for query in [
+        "ALTER TABLE users ADD COLUMN username TEXT",
+        "ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 1",
+        "ALTER TABLE users ADD COLUMN otp_code TEXT",
+        "ALTER TABLE documents ADD COLUMN is_channel_copy INTEGER DEFAULT 0",
+        "ALTER TABLE channel_members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'"
+    ]:
+        try:
+            conn.execute(query)
+            conn.commit()
+            print(f"Migration success: {query}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e) or "already exists" in str(e):
+                pass
+            else:
+                print(f"Migration error for {query}: {e}")
         
     try:
         conn.execute("ALTER TABLE channel_notes ADD COLUMN order_index INTEGER DEFAULT 0")
@@ -159,7 +168,7 @@ init_db()
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    return hashlib.sha256((password + PASSWORD_SALT).encode()).hexdigest()
 
 def create_token(user_id: str) -> str:
     payload = {
@@ -176,6 +185,50 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) 
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+# ── Email Helpers ─────────────────────────────────────────────────────────────
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+
+def send_otp_email(target_email: str, otp: str):
+    if not SMTP_USER or not SMTP_PASSWORD:
+        print(f"\n[MOCK EMAIL] To: {target_email}\nSubject: NoteHub Verification Code\nBody: Your code is {otp}\n")
+        return
+
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    msg = MIMEMultipart()
+    msg['From'] = SMTP_USER
+    msg['To'] = target_email
+    msg['Subject'] = "NoteHub - Verify your email"
+
+    body = f"""
+    Hi there,
+
+    Welcome to NoteHub! Your verification code is:
+
+    {otp}
+
+    Enter this code in the app to complete your registration.
+
+    Best,
+    The NoteHub Team
+    """
+    msg.attach(MIMEText(body, 'plain'))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+            print(f"Email sent to {target_email}")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -198,7 +251,7 @@ class UserResponse(BaseModel):
 
 class ChannelCreate(BaseModel):
     name: str
-    description: str
+    description: Optional[str] = None
 
 class SubmitNoteRequest(BaseModel):
     document_id: str
@@ -210,6 +263,10 @@ class DocumentUpdate(BaseModel):
     title: str
     extracted_text: str
 
+class ChannelUpdate(BaseModel):
+    name: str
+    description: Optional[str] = None
+
 class ReorderRequest(BaseModel):
     submission_ids: List[str]
 
@@ -218,6 +275,18 @@ class ReorderRequest(BaseModel):
 @app.post("/auth/signup")
 def signup(body: SignupRequest):
     conn = get_db()
+    
+    # Self-healing migrations
+    try:
+        conn.execute("SELECT username FROM users LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+            conn.execute("ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 1")
+            conn.execute("ALTER TABLE users ADD COLUMN otp_code TEXT")
+            conn.commit()
+        except:
+            pass
     
     # Check email
     existing_email = conn.execute("SELECT id FROM users WHERE email = ?", (body.email,)).fetchone()
@@ -233,29 +302,75 @@ def signup(body: SignupRequest):
     
     user_id = str(uuid.uuid4())
     created_at = datetime.datetime.utcnow().isoformat()
+    
+    # Generate OTP
+    import random
+    otp = str(random.randint(100000, 999999))
+    
+    # Auto-verify specific accounts
+    is_verified = 1 if body.email in ['bruh@bruh', 'admin@admin'] else 0
+    
     conn.execute(
-        "INSERT INTO users (id, name, username, email, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, body.name, body.username.lower(), body.email, hash_password(body.password), created_at)
+        "INSERT INTO users (id, name, username, email, password_hash, is_verified, otp_code, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, body.name, body.username.lower(), body.email, hash_password(body.password), is_verified, otp, created_at)
     )
     conn.commit()
     conn.close()
     
-    token = create_token(user_id)
-    return {"token": token, "user": {"id": user_id, "name": body.name, "username": body.username.lower(), "email": body.email, "created_at": created_at}}
+    # Send email
+    send_otp_email(body.email, otp)
+    
+    return {"message": "Signup successful", "email": body.email, "is_verified": is_verified, "otp_debug": otp}
+
+class VerifyRequest(BaseModel):
+    email: str
+    otp: str
+
+@app.post("/auth/verify")
+def verify_email(body: VerifyRequest):
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE email = ? AND otp_code = ?", (body.email, body.otp)).fetchone()
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+        
+    conn.execute("UPDATE users SET is_verified = 1, otp_code = NULL WHERE id = ?", (user["id"],))
+    conn.commit()
+    conn.close()
+    return {"success": True}
 
 @app.post("/auth/login")
 def login(body: LoginRequest):
     conn = get_db()
     user = conn.execute(
-        "SELECT * FROM users WHERE email = ? AND password_hash = ?",
-        (body.email, hash_password(body.password))
+        "SELECT * FROM users WHERE email = ?",
+        (body.email,)
     ).fetchone()
-    conn.close()
     
     if not user:
+        conn.close()
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Password bypass for test accounts as requested
+    is_test_account = user["email"] in ['bruh@bruh', 'admin@admin']
     
+    if not is_test_account and user["password_hash"] != hash_password(body.password):
+        conn.close()
+        raise HTTPException(status_code=401, detail="Invalid password")
+    
+    # Auto-verify test accounts on login if they aren't verified yet
+    if user["is_verified"] == 0 and is_test_account:
+        conn.execute("UPDATE users SET is_verified = 1 WHERE id = ?", (user["id"],))
+        conn.commit()
+        # Refresh user record
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+
+    if user["is_verified"] == 0:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Email not verified")
+        
     token = create_token(user["id"])
+    conn.close()
     return {"token": token, "user": dict(user)}
 
 @app.get("/auth/me")
@@ -594,6 +709,29 @@ async def create_document(request: Request, user_id: str = Depends(verify_token)
         "created_at": created_at
     }
 
+class DocumentTextCreate(BaseModel):
+    title: str
+    text: str
+
+@app.post("/documents/create-text")
+def create_text_document(body: DocumentTextCreate, user_id: str = Depends(verify_token)):
+    doc_id = str(uuid.uuid4())
+    created_at = datetime.datetime.utcnow().isoformat()
+    
+    # Generate PDF from text
+    pages = [{"text": body.text, "image_bytes": None}]
+    pdf_bytes = create_pdf(body.title, pages)
+    pdf_b64 = base64.b64encode(pdf_bytes).decode()
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO documents (id, user_id, title, extracted_text, pdf_base64, image_count, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+        (doc_id, user_id, body.title, body.text, pdf_b64, created_at)
+    )
+    conn.commit()
+    conn.close()
+    return {"id": doc_id, "title": body.title, "extracted_text": body.text, "created_at": created_at}
+
 @app.get("/documents")
 def list_documents(user_id: str = Depends(verify_token)):
     conn = get_db()
@@ -627,16 +765,17 @@ def delete_document(doc_id: str, user_id: str = Depends(verify_token)):
 @app.put("/documents/{doc_id}")
 def update_document(doc_id: str, body: DocumentUpdate, user_id: str = Depends(verify_token)):
     conn = get_db()
-    conn.execute(
-        "UPDATE documents SET title = ?, extracted_text = ? WHERE id = ? AND user_id = ?",
-        (body.title, body.extracted_text, doc_id, user_id)
-    )
-    if conn.total_changes == 0:
+    try:
+        conn.execute(
+            "UPDATE documents SET title = ?, extracted_text = ? WHERE id = ? AND user_id = ?",
+            (body.title.strip(), body.extracted_text, doc_id, user_id)
+        )
+        if conn.total_changes == 0:
+            raise HTTPException(status_code=404, detail="Document not found")
+        conn.commit()
+        return {"success": True}
+    finally:
         conn.close()
-        raise HTTPException(status_code=404, detail="Document not found")
-    conn.commit()
-    conn.close()
-    return {"success": True}
 
 @app.post("/documents/{doc_id}/pages")
 async def append_document_pages(doc_id: str, request: Request, user_id: str = Depends(verify_token)):
@@ -728,7 +867,7 @@ def create_channel(body: ChannelCreate, user_id: str = Depends(verify_token)):
     created_at = datetime.datetime.utcnow().isoformat()
     conn.execute(
         "INSERT INTO channels (id, name, description, admin_id, created_at) VALUES (?, ?, ?, ?, ?)",
-        (channel_id, body.name, body.description, user_id, created_at)
+        (channel_id, body.name, body.description or "", user_id, created_at)
     )
     # Admin is automatically a member
     conn.execute(
@@ -737,7 +876,27 @@ def create_channel(body: ChannelCreate, user_id: str = Depends(verify_token)):
     )
     conn.commit()
     conn.close()
-    return {"id": channel_id, "name": body.name, "description": body.description, "admin_id": user_id}
+    return {"id": channel_id}
+
+@app.put("/channels/{channel_id}")
+def update_channel(channel_id: str, body: ChannelUpdate, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    if not channel:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Channel not found")
+        
+    if channel["admin_id"] != user_id:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Only the channel admin can edit the channel")
+        
+    conn.execute(
+        "UPDATE channels SET name = ?, description = ? WHERE id = ?",
+        (body.name.strip() if hasattr(body.name, 'strip') else body.name, body.description, channel_id)
+    )
+    conn.commit()
+    conn.close()
+    return {"success": True}
 
 @app.get("/channels")
 def list_channels(user_id: str = Depends(verify_token)):
@@ -973,6 +1132,39 @@ def update_channel_note(channel_id: str, submission_id: str, body: NoteUpdate, u
     conn.execute("UPDATE documents SET extracted_text = ? WHERE id = ?", (body.extracted_text, sub["document_id"]))
     # Update note heading/subheading
     conn.execute("UPDATE channel_notes SET heading = ?, subheading = ? WHERE id = ?", (body.heading, body.subheading, submission_id))
+    
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+@app.delete("/channels/{channel_id}/notes/{submission_id}")
+def delete_channel_note(channel_id: str, submission_id: str, user_id: str = Depends(verify_token)):
+    conn = get_db()
+    channel = conn.execute("SELECT admin_id FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    if not channel:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Channel not found")
+        
+    member = conn.execute("SELECT role FROM channel_members WHERE channel_id = ? AND user_id = ?", (channel_id, user_id)).fetchone()
+    if channel["admin_id"] != user_id and (not member or member["role"] not in ['admin', 'moderator']):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Admin or Moderator access required")
+        
+    sub = conn.execute("SELECT document_id FROM channel_notes WHERE id = ? AND channel_id = ?", (submission_id, channel_id)).fetchone()
+    if not sub:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Note not found")
+    
+    doc_id = sub["document_id"]
+    
+    # Delete note entry
+    conn.execute("DELETE FROM channel_notes WHERE id = ?", (submission_id,))
+    
+    # Cleanup associated document if it's a channel copy
+    doc = conn.execute("SELECT is_channel_copy FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if doc and doc["is_channel_copy"]:
+        conn.execute("DELETE FROM document_pages WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
     
     conn.commit()
     conn.close()

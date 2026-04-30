@@ -3,10 +3,11 @@ import { useState, useRef, useEffect } from "react";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from "expo-router";
 import api from "../../services/api";
 
-const MODES = { IDLE: "idle", CAMERA: "camera", CROP: "crop", REVIEW: "review", UPLOADING: "uploading", EDIT_OUTPUT: "edit_output" };
+const MODES = { IDLE: "idle", CAMERA: "camera", CROP: "crop", REVIEW: "review", UPLOADING: "uploading", EDIT_OUTPUT: "edit_output", PASTE_TEXT: "paste_text" };
 
 export default function CaptureScreen() {
   const params = useLocalSearchParams();
@@ -50,6 +51,53 @@ export default function CaptureScreen() {
       if (!res.granted) return;
     }
     setMode(MODES.CAMERA);
+  }
+  
+  async function pickImages() {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert("Permission required", "Allow gallery access to pick photos.");
+      return;
+    }
+    
+    let result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsMultipleSelection: true,
+      quality: 0.8,
+    });
+    
+    if (!result.canceled) {
+      const newPhotos = result.assets.map(asset => ({
+        uri: asset.uri,
+        width: asset.width,
+        height: asset.height,
+        crop: [
+          { x: 0, y: 0 }, { x: 1, y: 0 },
+          { x: 1, y: 1 }, { x: 0, y: 1 }
+        ]
+      }));
+      setPhotos(prev => [...prev, ...newPhotos]);
+      setMode(MODES.REVIEW);
+    }
+  }
+
+  async function uploadText() {
+    if (!title.trim()) { Alert.alert("Title required", "Give your note a title."); return; }
+    if (!extractedText.trim()) { Alert.alert("Text required", "Paste some text first."); return; }
+    
+    setMode(MODES.UPLOADING);
+    try {
+      const res = await api.post("/documents/create-text", {
+        title: title.trim(),
+        text: extractedText
+      });
+      setCreatedDocId(res.data.id);
+      setExtractedText(res.data.extracted_text);
+      setMode(MODES.EDIT_OUTPUT);
+    } catch {
+      Alert.alert("Upload failed", "Could not save. Check your connection.");
+      setMode(MODES.PASTE_TEXT);
+    }
   }
 
   async function takePicture() {
@@ -253,6 +301,9 @@ export default function CaptureScreen() {
           <TouchableOpacity onPress={takePicture}>
             <View style={cam.shutter} />
           </TouchableOpacity>
+          <TouchableOpacity onPress={pickImages} style={{ position: "absolute", left: 40, bottom: 65 }}>
+            <Ionicons name="images" size={32} color="white" />
+          </TouchableOpacity>
           <TouchableOpacity onPress={() => setFacing(f => f === "back" ? "front" : "back")} style={{ position: "absolute", right: 40, bottom: 65 }}>
             <Ionicons name="camera-reverse" size={32} color="white" />
           </TouchableOpacity>
@@ -306,6 +357,15 @@ export default function CaptureScreen() {
             )}
           </View>
           <Text style={{ color: "#7A6DC4", textAlign: "center", marginTop: 20 }}>Drag the corners to align with your document.</Text>
+          <TouchableOpacity 
+            onPress={() => {
+              setMode(MODES.CAMERA);
+              setCurrentPhoto(null);
+            }} 
+            style={{ marginTop: 20, padding: 12, alignSelf: "center", backgroundColor: "rgba(232,93,117,0.1)", borderRadius: 12, borderWidth: 1, borderColor: "rgba(232,93,117,0.3)" }}
+          >
+            <Text style={{ color: "#E85D75", fontWeight: "bold" }}>Retake Photo</Text>
+          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
@@ -437,6 +497,42 @@ export default function CaptureScreen() {
     );
   }
 
+  // Paste Text mode
+  if (mode === MODES.PASTE_TEXT) {
+    return (
+      <SafeAreaView style={s.container}>
+        <View style={s.navBar}>
+          <TouchableOpacity onPress={() => setMode(MODES.IDLE)}>
+            <Ionicons name="close" size={24} color="#F5A623" />
+          </TouchableOpacity>
+          <Text style={s.navTitle}>Paste Text</Text>
+          <TouchableOpacity onPress={uploadText}>
+            <Ionicons name="checkmark" size={24} color="#F5A623" />
+          </TouchableOpacity>
+        </View>
+        <ScrollView contentContainerStyle={{ padding: 20 }}>
+          <Text style={s.label}>Document Title</Text>
+          <TextInput style={s.input} placeholder="e.g. My Study Notes" placeholderTextColor="#4a4460" value={title} onChangeText={setTitle} />
+          
+          <Text style={[s.label, { marginTop: 20 }]}>Content</Text>
+          <TextInput 
+            style={[s.input, { height: 350, textAlignVertical: "top", fontSize: 16 }]} 
+            placeholder="Paste your text here..." 
+            placeholderTextColor="#4a4460" 
+            multiline 
+            value={extractedText} 
+            onChangeText={setExtractedText} 
+          />
+        </ScrollView>
+        <View style={s.bottomAction}>
+          <TouchableOpacity style={s.btn} onPress={uploadText}>
+            <Text style={s.btnText}>Create Document</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   // Idle mode
   return (
     <SafeAreaView style={s.container}>
@@ -446,8 +542,20 @@ export default function CaptureScreen() {
         <TouchableOpacity style={s.cameraBtn} onPress={openCamera}>
           <Ionicons name="camera" size={56} color="#F5A623" />
         </TouchableOpacity>
-        <Text style={[s.title, { fontSize: 22, marginTop: 24, textAlign: "center" }]}>Start Capturing</Text>
-        <Text style={[s.subtitle, { textAlign: "center" }]}>Take photos of your notes, slides, or textbooks.</Text>
+        
+        <View style={{ flexDirection: "row", gap: 12, marginTop: 24 }}>
+          <TouchableOpacity style={[s.btn, { flex: 1, backgroundColor: "#1E1A4A", borderWidth: 1, borderColor: "#2D266B" }]} onPress={pickImages}>
+            <Ionicons name="images" size={20} color="#F5A623" style={{ marginBottom: 4 }} />
+            <Text style={[s.btnText, { color: "#F8F6F0", fontSize: 14 }]}>Gallery</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[s.btn, { flex: 1, backgroundColor: "#1E1A4A", borderWidth: 1, borderColor: "#2D266B" }]} onPress={() => setMode(MODES.PASTE_TEXT)}>
+            <Ionicons name="clipboard" size={20} color="#F5A623" style={{ marginBottom: 4 }} />
+            <Text style={[s.btnText, { color: "#F8F6F0", fontSize: 14 }]}>Paste Text</Text>
+          </TouchableOpacity>
+        </View>
+
+        <Text style={[s.title, { fontSize: 22, marginTop: 32, textAlign: "center" }]}>Start Capturing</Text>
+        <Text style={[s.subtitle, { textAlign: "center" }]}>Take photos, pick from gallery, or paste text directly.</Text>
         <View style={{ marginTop: 28, gap: 12 }}>
           {[
             { step: "1", icon: "camera-outline", label: "Take photos inside the app" },
