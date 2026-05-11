@@ -17,6 +17,11 @@ export default function LoginScreen() {
   async function handleLogin() {
     setError("");
     if (!email.trim() || !password.trim()) { setError("Please fill in all fields."); return; }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      setError("Please enter a valid email address.");
+      return;
+    }
     setLoading(true);
     try { await login(email.trim().toLowerCase(), password); }
     catch (err) { setError(err.response?.data?.detail || "Login failed. Check your credentials."); }

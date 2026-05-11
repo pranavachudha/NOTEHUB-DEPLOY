@@ -22,6 +22,12 @@ export default function SignupScreen() {
     if (!name.trim() || !username.trim() || !email.trim() || !password.trim()) { setError("Please fill in all fields."); return; }
     if (password !== confirm) { setError("Passwords do not match."); return; }
     
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+
     const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]).{6,}$/;
     if (!passwordRegex.test(password)) {
       setError("Password must be at least 6 characters and include a capital letter, a number, and a symbol.");

@@ -3,7 +3,7 @@ import axios from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // For production, set EXPO_PUBLIC_API_URL in your environment or .env file
-const DEFAULT_IP = "10.28.18.177"; // Change this to your local IP for mobile
+const DEFAULT_IP = "10.205.111.177"; // Change this to your local IP for mobile
 export const BASE_URL = process.env.EXPO_PUBLIC_API_URL ||
   (Platform.OS === "web" ? "http://localhost:8000" : `http://${DEFAULT_IP}:8000`);
 
