@@ -24,6 +24,8 @@ from reportlab.lib.units import inch
 import textwrap
 import requests as http_requests
 import base64 as b64
+import threading
+from fastapi import BackgroundTasks
 
 app = FastAPI(title="NoteHub API", version="1.0.0")
 
@@ -40,11 +42,17 @@ ALGORITHM = "HS256"
 PASSWORD_SALT = "notehub-salt-v1" # Simple salt for sha256
 security = HTTPBearer()
 
+# Semaphore to ensure only one OCR job runs at a time on the laptop
+ocr_semaphore = threading.Semaphore(1)
+
 # ── Database ──────────────────────────────────────────────────────────────────
 
 def get_db():
     db_path = os.getenv("DB_PATH", "notehub.db")
-    conn = sqlite3.connect(db_path)
+    # Increase timeout to 30 seconds to wait for other processes
+    conn = sqlite3.connect(db_path, timeout=30)
+    # Enable WAL mode for better concurrency (allows simultaneous reads and writes)
+    conn.execute("PRAGMA journal_mode=WAL;")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -70,6 +78,8 @@ def init_db():
             extracted_text TEXT,
             pdf_base64 TEXT,
             image_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'completed', -- 'pending', 'processing', 'completed', 'failed'
+            error_message TEXT,
             created_at TEXT NOT NULL,
             is_channel_copy INTEGER DEFAULT 0,
             FOREIGN KEY (user_id) REFERENCES users(id)
@@ -102,6 +112,8 @@ def init_db():
         "ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 1",
         "ALTER TABLE users ADD COLUMN otp_code TEXT",
         "ALTER TABLE documents ADD COLUMN is_channel_copy INTEGER DEFAULT 0",
+        "ALTER TABLE documents ADD COLUMN status TEXT DEFAULT 'completed'",
+        "ALTER TABLE documents ADD COLUMN error_message TEXT",
         "ALTER TABLE channel_members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'"
     ]:
         try:
@@ -454,7 +466,6 @@ def warp_perspective(image_bytes: bytes, points: List[dict]) -> bytes:
         print(f"Warp error: {e}")
         return image_bytes
 
-
 def extract_text_from_image(image_bytes: bytes) -> str:
     try:
         processed = preprocess_image(image_bytes)
@@ -479,6 +490,51 @@ def extract_text_from_image(image_bytes: bytes) -> str:
 
     except Exception as e:
         return f"[OCR Error: {str(e)}]"
+
+def run_ocr_background(doc_id: str):
+    """
+    Background worker that processes all 'pending' pages for a document.
+    Uses a semaphore to ensure only one Ollama request runs at a time.
+    """
+    conn = get_db()
+    doc = conn.execute("SELECT title FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if not doc:
+        conn.close()
+        return
+
+    pages = conn.execute("SELECT id, image_bytes FROM document_pages WHERE document_id = ? AND (extracted_text IS NULL OR extracted_text = '')", (doc_id,)).fetchall()
+    
+    all_extracted = []
+    
+    try:
+        conn.execute("UPDATE documents SET status = 'processing' WHERE id = ?", (doc_id,))
+        conn.commit()
+        
+        for p in pages:
+            with ocr_semaphore:
+                text = extract_text_from_image(p["image_bytes"])
+                conn.execute("UPDATE document_pages SET extracted_text = ? WHERE id = ?", (text, p["id"]))
+                conn.commit()
+                all_extracted.append(text)
+
+        # Re-generate PDF with all pages
+        all_pages = conn.execute("SELECT image_bytes, extracted_text FROM document_pages WHERE document_id = ? ORDER BY page_number ASC", (doc_id,)).fetchall()
+        pdf_bytes = create_pdf(doc["title"], [dict(ap) for ap in all_pages])
+        pdf_b64 = base64.b64encode(pdf_bytes).decode()
+        
+        combined_text = "\n\n--- Page Break ---\n\n".join([ap["extracted_text"] or "" for ap in all_pages])
+        
+        conn.execute(
+            "UPDATE documents SET extracted_text = ?, pdf_base64 = ?, status = 'completed' WHERE id = ?",
+            (combined_text, pdf_b64, doc_id)
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"Background OCR Error: {e}")
+        conn.execute("UPDATE documents SET status = 'failed', error_message = ? WHERE id = ?", (str(e), doc_id))
+        conn.commit()
+    finally:
+        conn.close()
     
 def create_pdf(title: str, pages: List[dict]) -> bytes:
     """
@@ -629,31 +685,19 @@ def export_channel_pdf(channel_id: str, user_id: str = Depends(verify_token)):
 # ── Document Routes ───────────────────────────────────────────────────────────
 
 @app.post("/documents/create")
-async def create_document(request: Request, user_id: str = Depends(verify_token)):
-    """
-    Accepts multipart form with:
-      - title: str
-      - image_count: int  (number of images)
-      - image_0, image_1, ..., image_N: UploadFile  (one field per page)
-
-    React Native FormData cannot reliably send repeated keys, so we use
-    unique field names per image instead.
-    """
+async def create_document(background_tasks: BackgroundTasks, request: Request, user_id: str = Depends(verify_token)):
     form = await request.form()
     title = form.get("title", "").strip()
     if not title:
         raise HTTPException(status_code=422, detail="title is required")
 
-    # Collect all image_N fields in order
     image_files = []
     crops = []
     i = 0
     while True:
         field = form.get(f"image_{i}")
-        if field is None:
-            break
+        if field is None: break
         image_files.append(field)
-        
         crop_data = form.get(f"crop_{i}")
         if crop_data:
             try: crops.append(json.loads(crop_data))
@@ -663,50 +707,48 @@ async def create_document(request: Request, user_id: str = Depends(verify_token)
         i += 1
 
     if not image_files:
-        raise HTTPException(status_code=422, detail="No images received. Expected fields: image_0, image_1, ...")
-
-    pages = []
-    all_text = []
-
-    for idx, img_file in enumerate(image_files):
-        img_bytes = await img_file.read()
-        if crops[idx]:
-            img_bytes = warp_perspective(img_bytes, crops[idx])
-        
-        text = extract_text_from_image(img_bytes)
-        pages.append({"image_bytes": img_bytes, "text": text})
-        all_text.append(text)
-
-    pdf_bytes = create_pdf(title, pages)
-    pdf_b64 = base64.b64encode(pdf_bytes).decode()
-    combined_text = "\n\n--- Page Break ---\n\n".join(all_text)
+        raise HTTPException(status_code=422, detail="No images received")
 
     doc_id = str(uuid.uuid4())
     created_at = datetime.datetime.utcnow().isoformat()
-
+    
     conn = get_db()
     conn.execute(
-        "INSERT INTO documents (id, user_id, title, extracted_text, pdf_base64, image_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (doc_id, user_id, title, combined_text, pdf_b64, len(image_files), created_at)
+        "INSERT INTO documents (id, user_id, title, status, image_count, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (doc_id, user_id, title, 'pending', len(image_files), created_at)
     )
     
-    # Save individual pages
-    for idx, page in enumerate(pages):
+    for idx, img_file in enumerate(image_files):
+        if hasattr(img_file, "read"):
+            img_bytes = await img_file.read()
+        else:
+            # Handle base64 strings from web browsers
+            img_str = str(img_file)
+            if "," in img_str: # data:image/jpeg;base64,...
+                img_str = img_str.split(",")[1]
+            try:
+                img_bytes = base64.b64decode(img_str)
+            except:
+                img_bytes = img_str.encode() # Fallback
+
+        if crops[idx]:
+            img_bytes = warp_perspective(img_bytes, crops[idx])
+        
         page_id = str(uuid.uuid4())
         conn.execute(
             "INSERT INTO document_pages (id, document_id, page_number, image_bytes, extracted_text) VALUES (?, ?, ?, ?, ?)",
-            (page_id, doc_id, idx, page["image_bytes"], page["text"])
+            (page_id, doc_id, idx, img_bytes, "")
         )
-        
     conn.commit()
     conn.close()
+
+    background_tasks.add_task(run_ocr_background, doc_id)
 
     return {
         "id": doc_id,
         "title": title,
-        "extracted_text": combined_text,
-        "image_count": len(image_files),
-        "created_at": created_at
+        "status": "pending",
+        "message": "OCR processing started in background"
     }
 
 class DocumentTextCreate(BaseModel):
@@ -736,7 +778,7 @@ def create_text_document(body: DocumentTextCreate, user_id: str = Depends(verify
 def list_documents(user_id: str = Depends(verify_token)):
     conn = get_db()
     docs = conn.execute(
-        "SELECT id, title, extracted_text, image_count, created_at FROM documents WHERE user_id = ? AND is_channel_copy = 0 ORDER BY created_at DESC",
+        "SELECT id, title, extracted_text, image_count, status, created_at FROM documents WHERE user_id = ? AND is_channel_copy = 0 ORDER BY created_at DESC",
         (user_id,)
     ).fetchall()
     conn.close()
@@ -778,7 +820,7 @@ def update_document(doc_id: str, body: DocumentUpdate, user_id: str = Depends(ve
         conn.close()
 
 @app.post("/documents/{doc_id}/pages")
-async def append_document_pages(doc_id: str, request: Request, user_id: str = Depends(verify_token)):
+async def append_document_pages(doc_id: str, background_tasks: BackgroundTasks, request: Request, user_id: str = Depends(verify_token)):
     form = await request.form()
     
     # Collect new images
@@ -802,57 +844,39 @@ async def append_document_pages(doc_id: str, request: Request, user_id: str = De
         raise HTTPException(status_code=422, detail="No images received")
 
     conn = get_db()
-    doc = conn.execute("SELECT * FROM documents WHERE id = ? AND user_id = ?", (doc_id, user_id)).fetchone()
-    if not doc:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Document not found")
+    # Get current max page number
+    max_page_row = conn.execute("SELECT MAX(page_number) FROM document_pages WHERE document_id = ?", (doc_id,)).fetchone()
+    current_idx = (max_page_row[0] if max_page_row and max_page_row[0] is not None else -1) + 1
 
-    # Get existing pages to maintain order and for PDF re-gen
-    existing_pages = conn.execute(
-        "SELECT image_bytes, extracted_text FROM document_pages WHERE document_id = ? ORDER BY page_number ASC",
-        (doc_id,)
-    ).fetchall()
-    
-    pages = [dict(p) for p in existing_pages]
-    all_text = [p["extracted_text"] for p in pages]
-    
-    # Process new images
-    new_page_start_idx = len(pages)
     for idx, img_file in enumerate(image_files):
-        img_bytes = await img_file.read()
+        if hasattr(img_file, "read"):
+            img_bytes = await img_file.read()
+        else:
+            # Handle base64 strings from web browsers
+            img_str = str(img_file)
+            if "," in img_str: # data:image/jpeg;base64,...
+                img_str = img_str.split(",")[1]
+            try:
+                img_bytes = base64.b64decode(img_str)
+            except:
+                img_bytes = img_str.encode() # Fallback
+
         if crops[idx]:
             img_bytes = warp_perspective(img_bytes, crops[idx])
-            
-        text = extract_text_from_image(img_bytes)
-        pages.append({"image_bytes": img_bytes, "text": text})
-        all_text.append(text)
         
-        # Save to DB
         page_id = str(uuid.uuid4())
         conn.execute(
             "INSERT INTO document_pages (id, document_id, page_number, image_bytes, extracted_text) VALUES (?, ?, ?, ?, ?)",
-            (page_id, doc_id, new_page_start_idx, img_bytes, text)
+            (page_id, doc_id, current_idx + idx, img_bytes, "")
         )
-        new_page_start_idx += 1
-
-    # Re-generate PDF and combined text
-    pdf_bytes = create_pdf(doc["title"], pages)
-    pdf_b64 = base64.b64encode(pdf_bytes).decode()
-    combined_text = "\n\n--- Page Break ---\n\n".join(all_text)
-
-    conn.execute(
-        "UPDATE documents SET extracted_text = ?, pdf_base64 = ?, image_count = ? WHERE id = ?",
-        (combined_text, pdf_b64, len(pages), doc_id)
-    )
     
+    conn.execute("UPDATE documents SET status = 'pending', image_count = image_count + ? WHERE id = ?", (len(image_files), doc_id))
     conn.commit()
     conn.close()
 
-    return {
-        "id": doc_id,
-        "extracted_text": combined_text,
-        "image_count": len(pages)
-    }
+    background_tasks.add_task(run_ocr_background, doc_id)
+
+    return {"success": True, "message": "Pages added, OCR processing started"}
 
 @app.get("/")
 def root():
