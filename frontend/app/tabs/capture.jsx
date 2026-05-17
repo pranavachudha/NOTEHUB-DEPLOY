@@ -179,8 +179,11 @@ export default function CaptureScreen() {
 
       console.log("Server responded:", res.data);
       setPhotos([]);
+      setTitle("");
+      setMode(MODES.IDLE);
       Alert.alert("Upload Successful", "OCR has started in the background. You can see the progress in your Saved Docs.");
       router.replace("/tabs/docs");
+
     } catch (err) {
       console.error("Upload error detail:", err);
       console.error("Error response:", err.response?.data);
