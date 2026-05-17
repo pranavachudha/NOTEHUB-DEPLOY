@@ -475,19 +475,33 @@ def extract_text_from_image(image_bytes: bytes) -> str:
         try:
             import google.generativeai as genai
             genai.configure(api_key=gemini_key)
-            model = genai.GenerativeModel('gemini-1.5-flash')
             
-            # Convert bytes to PIL Image
-            img = Image.open(io.BytesIO(image_bytes))
+            # Try active models in 2026 in order of recommendation
+            model_names = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+            last_err = None
             
-            response = model.generate_content([
-                "Extract all text from this image exactly as written, including any handwriting. Return only the extracted text, nothing else.",
-                img
-            ])
-            print("GEMINI RESPONSE:", response.text[:200])
-            return response.text.strip()
+            for m_name in model_names:
+                try:
+                    print(f"Attempting OCR using model: {m_name}...")
+                    model = genai.GenerativeModel(m_name)
+                    img = Image.open(io.BytesIO(image_bytes))
+                    response = model.generate_content([
+                        "Extract all text from this image exactly as written, including any handwriting. Return only the extracted text, nothing else.",
+                        img
+                    ])
+                    print(f"SUCCESS WITH MODEL: {m_name}")
+                    print("GEMINI RESPONSE:", response.text[:200])
+                    return response.text.strip()
+                except Exception as model_err:
+                    print(f"Model {m_name} failed: {model_err}")
+                    last_err = model_err
+                    continue
+            
+            if last_err:
+                raise last_err
         except Exception as e:
             print(f"Gemini Error: {e}, falling back to Ollama...")
+
 
     # Fallback to Ollama
     try:
