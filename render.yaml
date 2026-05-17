@@ -7,10 +7,7 @@ services:
     dockerfilePath: ./backend/Dockerfile
     envVars:
       - key: DB_PATH
-        value: /app/data/notehub.db
+        value: /app/notehub.db
       - key: SECRET_KEY
         generateValue: true
-    disk:
-      name: notehub-data
-      mountPath: /app/data
-      sizeGB: 1
+
