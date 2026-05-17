@@ -36,6 +36,12 @@ const api = axios.create({
 });
 
 api.interceptors.request.use(async (config) => {
+  // Dynamically resolve custom URL from AsyncStorage on every request to prevent race conditions
+  const savedUrl = await AsyncStorage.getItem("custom_api_url");
+  if (savedUrl && Platform.OS !== 'web') {
+    config.baseURL = savedUrl;
+  }
+
   const token = await AsyncStorage.getItem("token");
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
@@ -44,3 +50,4 @@ api.interceptors.request.use(async (config) => {
 });
 
 export default api;
+
