@@ -59,7 +59,20 @@ export default function DocsScreen() {
     finally { setSavingEdit(false); }
   }
 
-  useFocusEffect(useCallback(() => { loadDocs(); }, []));
+  useFocusEffect(useCallback(() => { 
+    loadDocs(); 
+    // Start polling if there are pending docs
+    const timer = setInterval(() => {
+      setDocs(currentDocs => {
+        const hasPending = currentDocs.some(d => d.status === 'pending' || d.status === 'processing');
+        if (hasPending) {
+          loadDocs(true);
+        }
+        return currentDocs;
+      });
+    }, 5000);
+    return () => clearInterval(timer);
+  }, []));
 
   async function loadDocs(silent = false) {
     if (!silent) setLoading(true);
@@ -183,13 +196,28 @@ export default function DocsScreen() {
               </View>
               <View style={s.chips}>
                 <Chip icon="images-outline" label={`${item.image_count} photo${item.image_count !== 1 ? "s" : ""}`} />
-                <Chip icon="text-outline" label={`${wordCount(item.extracted_text)} words`} />
+                {item.status === 'completed' ? (
+                  <Chip icon="text-outline" label={`${wordCount(item.extracted_text)} words`} />
+                ) : (
+                  <View style={[s.statusChip, item.status === 'failed' ? s.failedChip : s.pendingChip]}>
+                    <ActivityIndicator size="small" color={item.status === 'failed' ? "#E85D75" : "#F5A623"} style={{ transform: [{ scale: 0.6 }], marginRight: -4 }} />
+                    <Text style={[s.statusText, item.status === 'failed' ? { color: "#E85D75" } : {}]}>
+                      {item.status === 'processing' ? "Processing..." : item.status === 'failed' ? "Failed" : "Queued"}
+                    </Text>
+                  </View>
+                )}
                 <Chip icon="calendar-outline" label={formatDate(item.created_at)} />
               </View>
-              {item.extracted_text ? <Text style={s.preview} numberOfLines={2}>{item.extracted_text}</Text> : null}
+              {item.status === 'completed' && item.extracted_text ? (
+                <Text style={s.preview} numberOfLines={2}>{item.extracted_text}</Text>
+              ) : item.status === 'failed' ? (
+                <Text style={[s.preview, { color: "#E85D75" }]}>OCR failed. Tap to see error.</Text>
+              ) : (
+                <Text style={s.preview}>OCR is running in background. Please wait...</Text>
+              )}
               <View style={s.cardFooter}>
                 <Text style={s.viewText}>Tap to view text</Text>
-                <TouchableOpacity onPress={() => downloadPDF(item)} disabled={downloading} style={s.exportBtn}>
+                <TouchableOpacity onPress={() => downloadPDF(item)} disabled={downloading || item.status !== 'completed'} style={[s.exportBtn, item.status !== 'completed' && { opacity: 0.5 }]}>
                   <Ionicons name="download-outline" size={15} color="#7A6DC4" />
                   <Text style={s.exportText}>Export PDF</Text>
                 </TouchableOpacity>
@@ -254,7 +282,15 @@ export default function DocsScreen() {
             <View style={s.modalMeta}>
               <Chip icon="images-outline" label={`${selectedDoc.image_count} photo${selectedDoc.image_count !== 1 ? "s" : ""}`} />
               <Chip icon="calendar-outline" label={formatDate(selectedDoc.created_at)} />
-              <Chip icon="text-outline" label={`${wordCount(selectedDoc.extracted_text)} words`} />
+              {selectedDoc.status === 'completed' ? (
+                <Chip icon="text-outline" label={`${wordCount(selectedDoc.extracted_text)} words`} />
+              ) : (
+                <View style={[s.statusChip, selectedDoc.status === 'failed' ? s.failedChip : s.pendingChip]}>
+                  <Text style={[s.statusText, selectedDoc.status === 'failed' ? { color: "#E85D75" } : {}]}>
+                    {selectedDoc.status?.toUpperCase()}
+                  </Text>
+                </View>
+              )}
             </View>
             <ScrollView contentContainerStyle={{ padding: 20 }}>
               <Text style={s.screenLabel}>Extracted Text</Text>
@@ -267,7 +303,13 @@ export default function DocsScreen() {
                     onChangeText={setEditContent} 
                   />
                 ) : (
-                  <Text style={s.extractedText}>{selectedDoc.extracted_text || "No text was extracted."}</Text>
+                  <Text style={s.extractedText}>
+                    {selectedDoc.status === 'completed' 
+                      ? (selectedDoc.extracted_text || "No text was extracted.") 
+                      : selectedDoc.status === 'failed'
+                      ? `OCR Error: ${selectedDoc.error_message || "Unknown error"}`
+                      : "OCR is still processing. This usually takes 30-60 seconds per page on a laptop CPU. This screen will update automatically when ready."}
+                  </Text>
                 )}
               </View>
             </ScrollView>
@@ -344,4 +386,8 @@ const s = StyleSheet.create({
   createModalTitle: { color: "#F8F6F0", fontSize: 20, fontWeight: "bold" },
   channelRow: { flexDirection: "row", alignItems: "center", backgroundColor: "#0A0A0F", padding: 16, borderRadius: 12, marginBottom: 8, borderWidth: 1, borderColor: "#2D266B" },
   channelName: { color: "#F8F6F0", fontSize: 16, fontWeight: "600", flex: 1, marginLeft: 12 },
+  statusChip: { flexDirection: "row", alignItems: "center", backgroundColor: "#120F2E", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: "rgba(245,166,35,0.3)" },
+  pendingChip: { borderColor: "rgba(245,166,35,0.3)" },
+  failedChip: { borderColor: "rgba(232,93,117,0.3)" },
+  statusText: { color: "#F5A623", fontSize: 11, fontWeight: "bold" },
 });

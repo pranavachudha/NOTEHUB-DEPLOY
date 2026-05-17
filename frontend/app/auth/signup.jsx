@@ -44,7 +44,10 @@ export default function SignupScreen() {
         router.push({ pathname: "/auth/verify", params: { email: email.trim().toLowerCase(), otp_debug: res.otp_debug } });
       }
     }
-    catch (err) { setError(err.response?.data?.detail || "Signup failed. Please try again."); }
+    catch (err) { 
+      const msg = err.response?.data?.detail;
+      setError(msg || "Signup failed. Please try again."); 
+    }
     finally { setLoading(false); }
   }
 

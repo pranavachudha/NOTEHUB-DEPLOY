@@ -64,11 +64,13 @@ export default function CaptureScreen() {
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsMultipleSelection: true,
       quality: 0.8,
+      base64: true,
     });
     
     if (!result.canceled) {
       const newPhotos = result.assets.map(asset => ({
         uri: asset.uri,
+        base64: asset.base64,
         width: asset.width,
         height: asset.height,
         crop: [
@@ -121,41 +123,68 @@ export default function CaptureScreen() {
     } else {
       setPhotos(prev => [...prev, { ...currentPhoto, crop: cropPoints }]);
     }
-    setMode(MODES.CAMERA);
+    setMode(MODES.REVIEW);
     setCurrentPhoto(null);
     setEditingIndex(-1);
   }
 
   async function uploadAndCreate() {
-    if (!targetDocId && !title.trim()) { Alert.alert("Title required", "Give your notes a title."); return; }
+    console.log("Upload started...");
+    if (!targetDocId && !(title || "").trim()) { Alert.alert("Title required", "Give your notes a title."); return; }
     if (photos.length === 0) { Alert.alert("No photos", "Take at least one photo."); return; }
     
     setMode(MODES.UPLOADING);
+    console.log("Mode set to uploading, preparing formData with", photos.length, "photos");
     try {
       const formData = new FormData();
       if (!targetDocId) formData.append("title", title.trim());
       
-      photos.forEach((p, i) => {
-        formData.append(`image_${i}`, { uri: p.uri, name: `photo_${i}.jpg`, type: "image/jpeg" });
+      await Promise.all(photos.map(async (p, i) => {
+        let fileToUpload;
+        if (Platform.OS === "web") {
+          if (p.base64) {
+            // If we already have base64 (from pickImages), use it directly
+            const byteCharacters = atob(p.base64);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {
+                byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            const blob = new Blob([byteArray], { type: "image/jpeg" });
+            fileToUpload = new File([blob], `photo_${i}.jpg`, { type: "image/jpeg" });
+          } else {
+            const response = await fetch(p.uri);
+            const blob = await response.blob();
+            fileToUpload = new File([blob], `photo_${i}.jpg`, { type: "image/jpeg" });
+          }
+        } else {
+          fileToUpload = { uri: p.uri, name: `photo_${i}.jpg`, type: "image/jpeg" };
+        }
+        
+        formData.append(`image_${i}`, fileToUpload);
         if (p.crop) {
           formData.append(`crop_${i}`, JSON.stringify(p.crop));
         }
-      });
+      }));
 
+      console.log("Sending request to server...");
       let res;
+      const config = { headers: { "Content-Type": "multipart/form-data" } };
       if (targetDocId) {
-        res = await api.post(`/documents/${targetDocId}/pages`, formData, { headers: { "Content-Type": "multipart/form-data" } });
+        res = await api.post(`/documents/${targetDocId}/pages`, formData, config);
         setCreatedDocId(targetDocId);
       } else {
-        res = await api.post("/documents/create", formData, { headers: { "Content-Type": "multipart/form-data" } });
-        setCreatedDocId(res.data.id);
+        res = await api.post("/documents/create", formData, config);
       }
 
+      console.log("Server responded:", res.data);
       setPhotos([]);
-      setExtractedText(res.data.extracted_text);
-      setMode(MODES.EDIT_OUTPUT);
-    } catch {
-      Alert.alert("Upload failed", "Could not save. Check your connection.");
+      Alert.alert("Upload Successful", "OCR has started in the background. You can see the progress in your Saved Docs.");
+      router.replace("/tabs/docs");
+    } catch (err) {
+      console.error("Upload error detail:", err);
+      console.error("Error response:", err.response?.data);
+      Alert.alert("Upload failed", "Could not save. " + (err.response?.data?.detail || "Check your connection."));
       setMode(MODES.REVIEW);
     }
   }
@@ -424,9 +453,16 @@ export default function CaptureScreen() {
             </View>
         </ScrollView>
         <View style={s.bottomAction}>
-          <TouchableOpacity style={s.btn} onPress={uploadAndCreate}>
-            <Text style={s.btnText}>{targetDocId ? "Append to Document" : "Extract Text & Save PDF"}</Text>
-          </TouchableOpacity>
+            <TouchableOpacity 
+              style={[s.actionButton, { height: 60, marginTop: 20 }]} 
+              onPress={uploadAndCreate}
+              disabled={mode === MODES.UPLOADING}
+            >
+              <Ionicons name="document-text" size={28} color="#0A0A0F" />
+              <Text style={s.actionButtonText}>
+                {mode === MODES.UPLOADING ? "Uploading... Please Wait" : "Extract Text & Save PDF"}
+              </Text>
+            </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
@@ -437,8 +473,10 @@ export default function CaptureScreen() {
     return (
       <SafeAreaView style={[s.container, { justifyContent: "center", alignItems: "center" }]}>
         <ActivityIndicator color="#F5A623" size="large" />
-        <Text style={[s.title, { marginTop: 20 }]}>Extracting text…</Text>
-        <Text style={{ color: "#7A6DC4", marginTop: 8 }}>Generating your PDF</Text>
+        <Text style={[s.title, { marginTop: 20, textAlign: "center" }]}>Uploading Documents…</Text>
+        <Text style={{ color: "#7A6DC4", marginTop: 8, textAlign: "center", paddingHorizontal: 40 }}>
+          Your images are being sent to the server. OCR will run in the background.
+        </Text>
       </SafeAreaView>
     );
   }
@@ -597,6 +635,8 @@ const s = StyleSheet.create({
   channelName: { color: "#F8F6F0", fontSize: 16, fontWeight: "600", flex: 1, marginLeft: 12 },
   cropHandle: { position: "absolute", width: 44, height: 44, alignItems: "center", justifyContent: "center" },
   cropHandleInner: { width: 16, height: 16, borderRadius: 8, backgroundColor: "#F5A623", borderWidth: 2, borderColor: "white" },
+  actionButton: { backgroundColor: "#F5A623", borderRadius: 16, paddingVertical: 18, paddingHorizontal: 20, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10, shadowColor: "#F5A623", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 5 },
+  actionButtonText: { color: "#0A0A0F", fontWeight: "bold", fontSize: 18 },
 });
 
 const cam = StyleSheet.create({

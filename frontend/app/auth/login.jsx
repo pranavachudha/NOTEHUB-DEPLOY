@@ -1,10 +1,11 @@
-import { View, Text, TextInput, TouchableOpacity, KeyboardAvoidingView, Platform, ScrollView, Alert, ActivityIndicator, StyleSheet } from "react-native";
-import { useState } from "react";
+import { View, Text, TextInput, TouchableOpacity, KeyboardAvoidingView, Platform, ScrollView, Alert, ActivityIndicator, StyleSheet, Modal } from "react-native";
+import { useState, useEffect } from "react";
 import { useRouter } from "expo-router";
 import { useAuth } from "../../context/AuthContext";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { BASE_URL, updateBaseUrl } from "../../services/api";
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -13,6 +14,16 @@ export default function LoginScreen() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  
+  // Server Settings
+  const [showSettings, setShowSettings] = useState(false);
+  const [newUrl, setNewUrl] = useState(BASE_URL);
+
+  async function handleSaveUrl() {
+    await updateBaseUrl(newUrl);
+    setShowSettings(false);
+    Alert.alert("Success", "Server URL updated!");
+  }
 
   async function handleLogin() {
     setError("");
@@ -24,7 +35,19 @@ export default function LoginScreen() {
     }
     setLoading(true);
     try { await login(email.trim().toLowerCase(), password); }
-    catch (err) { setError(err.response?.data?.detail || "Login failed. Check your credentials."); }
+    catch (err) { 
+      if (!err.response) {
+        setError(`Network Error: Cannot reach ${BASE_URL}. Make sure your laptop tunnel is running.`);
+      } else {
+        const msg = err.response?.data?.detail;
+        if (msg === "Email not verified") {
+          Alert.alert("Verification Required", "Please verify your email before logging in.");
+          router.push({ pathname: "/auth/verify", params: { email: email.trim().toLowerCase() } });
+        } else {
+          setError(msg || "Login failed. Check your credentials."); 
+        }
+      }
+    }
     finally { setLoading(false); }
   }
 
@@ -33,8 +56,29 @@ export default function LoginScreen() {
       <StatusBar style="light" />
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-          <Text style={s.logo}>NoteHub</Text>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+            <Text style={s.logo}>NoteHub</Text>
+            <TouchableOpacity onPress={() => setShowSettings(true)}>
+              <Ionicons name="settings-outline" size={24} color="#7A6DC4" />
+            </TouchableOpacity>
+          </View>
           <Text style={s.tagline}>Capture knowledge, anywhere.</Text>
+
+          <Modal visible={showSettings} animationType="slide" transparent>
+            <View style={s.modalOverlay}>
+              <View style={s.modalContent}>
+                <Text style={s.modalTitle}>Server Settings</Text>
+                <Text style={s.label}>API Base URL</Text>
+                <TextInput style={s.input} value={newUrl} onChangeText={setNewUrl} placeholder="https://xxx.lhr.life" placeholderTextColor="#4a4460" />
+                <TouchableOpacity style={s.button} onPress={handleSaveUrl}>
+                  <Text style={s.buttonText}>Save Changes</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={{ marginTop: 20, alignItems: "center" }} onPress={() => setShowSettings(false)}>
+                  <Text style={{ color: "#7A6DC4" }}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
 
           {error ? (
             <View style={s.errorBox}>
@@ -76,6 +120,8 @@ const s = StyleSheet.create({
   footer: { flexDirection: "row", justifyContent: "center", marginTop: 40 },
   footerText: { color: "#4a4460", fontSize: 14 },
   footerLink: { color: "#F5A623", fontSize: 14, fontWeight: "600" },
-  errorBox: { flexDirection: "row", alignItems: "center", backgroundColor: "rgba(232, 93, 117, 0.1)", padding: 12, borderRadius: 10, marginTop: 20, gap: 8, borderWidth: 1, borderColor: "rgba(232, 93, 117, 0.2)" },
   errorText: { color: "#E85D75", fontSize: 13, flex: 1, fontWeight: "500" },
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.8)", justifyContent: "center", padding: 20 },
+  modalContent: { backgroundColor: "#1E1A4A", borderRadius: 20, padding: 24, borderWidth: 1, borderColor: "#2D266B" },
+  modalTitle: { color: "#F8F6F0", fontSize: 20, fontWeight: "bold", marginBottom: 20, textAlign: "center" },
 });

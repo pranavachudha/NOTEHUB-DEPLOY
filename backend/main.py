@@ -405,6 +405,8 @@ def preprocess_image(image_bytes: bytes) -> bytes:
     """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        return image_bytes
 
     # Resize if very large — keeps detail but reduces Ollama payload
     max_dim = 1600
@@ -467,6 +469,27 @@ def warp_perspective(image_bytes: bytes, points: List[dict]) -> bytes:
         return image_bytes
 
 def extract_text_from_image(image_bytes: bytes) -> str:
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    
+    if gemini_key:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=gemini_key)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            
+            # Convert bytes to PIL Image
+            img = Image.open(io.BytesIO(image_bytes))
+            
+            response = model.generate_content([
+                "Extract all text from this image exactly as written, including any handwriting. Return only the extracted text, nothing else.",
+                img
+            ])
+            print("GEMINI RESPONSE:", response.text[:200])
+            return response.text.strip()
+        except Exception as e:
+            print(f"Gemini Error: {e}, falling back to Ollama...")
+
+    # Fallback to Ollama
     try:
         processed = preprocess_image(image_bytes)
         image_b64 = b64.b64encode(processed).decode("utf-8")
@@ -481,7 +504,7 @@ def extract_text_from_image(image_bytes: bytes) -> str:
                 "images": [image_b64],
                 "stream": False
             },
-            timeout=480  # 8 min — llama3.2-vision is heavier, needs more time on CPU
+            timeout=480
         )
 
         result = res.json()
@@ -722,14 +745,16 @@ async def create_document(background_tasks: BackgroundTasks, request: Request, u
         if hasattr(img_file, "read"):
             img_bytes = await img_file.read()
         else:
-            # Handle base64 strings from web browsers
-            img_str = str(img_file)
-            if "," in img_str: # data:image/jpeg;base64,...
+            img_str = str(img_file).strip()
+            if ";base64," in img_str:
+                img_str = img_str.split(";base64,")[1]
+            elif "," in img_str:
                 img_str = img_str.split(",")[1]
+            
             try:
-                img_bytes = base64.b64decode(img_str)
+                img_bytes = base64.b64decode(img_str.replace(" ", "").replace("\n", "").replace("\r", ""))
             except:
-                img_bytes = img_str.encode() # Fallback
+                img_bytes = img_str.encode()
 
         if crops[idx]:
             img_bytes = warp_perspective(img_bytes, crops[idx])
@@ -853,13 +878,15 @@ async def append_document_pages(doc_id: str, background_tasks: BackgroundTasks, 
             img_bytes = await img_file.read()
         else:
             # Handle base64 strings from web browsers
-            img_str = str(img_file)
-            if "," in img_str: # data:image/jpeg;base64,...
+            img_str = str(img_file).strip()
+            if ";base64," in img_str:
+                img_str = img_str.split(";base64,")[1]
+            elif "," in img_str:
                 img_str = img_str.split(",")[1]
             try:
-                img_bytes = base64.b64decode(img_str)
+                img_bytes = base64.b64decode(img_str.replace(" ", "").replace("\n", "").replace("\r", ""))
             except:
-                img_bytes = img_str.encode() # Fallback
+                img_bytes = img_str.encode()
 
         if crops[idx]:
             img_bytes = warp_perspective(img_bytes, crops[idx])
