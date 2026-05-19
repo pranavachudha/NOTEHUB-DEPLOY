@@ -56,6 +56,113 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+# ── Supabase SQLite Cloud Backup Sync ──────────────────────────────────────────
+
+last_sync_time = 0.0
+
+def download_db_from_supabase():
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
+    if not supabase_url or not supabase_key:
+        print("Supabase credentials not configured. Skipping startup database restore.")
+        return
+        
+    try:
+        db_path = os.getenv("DB_PATH", "notehub.db")
+        headers = {
+            "Authorization": f"Bearer {supabase_key}",
+            "apikey": supabase_key
+        }
+        url = f"{supabase_url}/storage/v1/object/authenticated/backups/notehub.db"
+        print(f"Checking Supabase for database backup at: {url}")
+        res = http_requests.get(url, headers=headers)
+        if res.status_code == 200:
+            with open(db_path, "wb") as f:
+                f.write(res.content)
+            # Remove SQLite WAL files from any previous crash to prevent file mismatch
+            for ext in ["-wal", "-shm"]:
+                if os.path.exists(db_path + ext):
+                    try: os.remove(db_path + ext)
+                    except: pass
+            global last_sync_time
+            last_sync_time = os.path.getmtime(db_path)
+            print("Database successfully restored from Supabase on startup!")
+        else:
+            print(f"No database backup found on Supabase (Status Code: {res.status_code}). Starting with a fresh database.")
+    except Exception as e:
+        print(f"Error downloading database from Supabase: {e}")
+
+def upload_db_to_supabase():
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
+    if not supabase_url or not supabase_key:
+        return
+        
+    db_path = os.getenv("DB_PATH", "notehub.db")
+    if not os.path.exists(db_path):
+        return
+        
+    temp_backup_path = "notehub_backup.db"
+    try:
+        # Safe transactional SQLite backup using conn.backup to prevent lockups and corruption
+        src = sqlite3.connect(db_path)
+        dest = sqlite3.connect(temp_backup_path)
+        with dest:
+            src.backup(dest)
+        src.close()
+        dest.close()
+        
+        with open(temp_backup_path, "rb") as f:
+            file_data = f.read()
+            
+        headers = {
+            "Authorization": f"Bearer {supabase_key}",
+            "apikey": supabase_key,
+            "Content-Type": "application/octet-stream"
+        }
+        
+        # Try PUT to overwrite
+        url = f"{supabase_url}/storage/v1/object/backups/notehub.db"
+        res = http_requests.put(url, headers=headers, data=file_data)
+        if res.status_code == 200:
+            print("Database backup successfully synchronized to Supabase!")
+        else:
+            # Try POST to create new (if file doesn't exist yet)
+            res_post = http_requests.post(url, headers=headers, data=file_data)
+            if res_post.status_code == 200:
+                print("Database backup successfully initialized on Supabase!")
+            else:
+                print(f"Supabase Sync error: {res_post.status_code} - {res_post.text}")
+    except Exception as e:
+        print(f"Error uploading database to Supabase: {e}")
+    finally:
+        if os.path.exists(temp_backup_path):
+            try: os.remove(temp_backup_path)
+            except: pass
+
+def periodic_db_sync_worker():
+    global last_sync_time
+    db_path = os.getenv("DB_PATH", "notehub.db")
+    print("Supabase Background Sync Worker Started!")
+    while True:
+        # Wait 30 seconds between checks to minimize bandwidth
+        time.sleep(30)
+        
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_KEY")
+        if not supabase_url or not supabase_key:
+            continue
+            
+        try:
+            if os.path.exists(db_path):
+                current_mtime = os.path.getmtime(db_path)
+                if current_mtime > last_sync_time:
+                    print("Change detected in local database. Syncing to Supabase...")
+                    upload_db_to_supabase()
+                    last_sync_time = current_mtime
+        except Exception as e:
+            print(f"Error in background sync worker: {e}")
+
 def init_db():
     conn = get_db()
     conn.execute("""
@@ -175,7 +282,14 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Restore DB from Supabase Cloud Backup before running DB setup / migrations
+download_db_from_supabase()
+
 init_db()
+
+# Launch Supabase Background Sync Daemon
+sync_thread = threading.Thread(target=periodic_db_sync_worker, daemon=True)
+sync_thread.start()
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 

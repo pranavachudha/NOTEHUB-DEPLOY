@@ -2,16 +2,12 @@ services:
   - type: web
     name: notehub-backend
     env: docker
-    plan: standard # Upgrade to standard or starter tier is required on Render to use persistent disks
+    plan: free
     dockerContext: ./backend
     dockerfilePath: ./backend/Dockerfile
-    disk:
-      name: notehub-db-volume
-      mountPath: /data
-      sizeGB: 1
     envVars:
       - key: DB_PATH
-        value: /data/notehub.db
+        value: notehub.db
       - key: SECRET_KEY
         generateValue: true
 

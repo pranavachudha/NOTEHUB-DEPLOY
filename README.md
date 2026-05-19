@@ -208,7 +208,7 @@ NoteHub is configured to be deployed on the **Render** cloud platform with zero 
        && rm -rf /var/lib/apt/lists/*
    ```
 2. **Uvicorn Concurrency Safety:** The server runs on a single Uvicorn worker to prevent thread and write locks on SQLite databases in containerized environments.
-3. **Database Persistence:** By default, SQLite stores data in the container workspace. To persist databases on Render Free/Starter tiers, configure a persistent disk mount at `/app/notehub.db` or use Render's built-in persistent disk store as defined in `render.yaml`.
+3. **Database Persistence (100% Free & Permanent):** By default, SQLite stores data inside the ephemeral container workspace, which gets wiped when Render goes to sleep. To make database storage 100% free and permanent on Render's Free tier, NoteHub features an automated background cloud-sync daemon. Simply add your free Supabase credentials (`SUPABASE_URL` and `SUPABASE_KEY`) to Render's environment variables. The server will automatically restore the latest `notehub.db` file from the cloud on startup, and safely synchronize any new local changes back to the cloud in the background every 30 seconds.
 
 ### To Deploy on Render:
 1. Push your NoteHub project to a private GitHub repository.
