@@ -3,7 +3,7 @@ import axios from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // For production, set EXPO_PUBLIC_API_URL in your environment or .env file
-const PRODUCTION_URL = "https://notehub-backend.onrender.com";
+const PRODUCTION_URL = "https://notehub-backend-ya00.onrender.com";
 const DEFAULT_IP = "172.29.4.25";
 
 export let BASE_URL = Platform.OS === 'web' 
