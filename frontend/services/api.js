@@ -3,14 +3,14 @@ import axios from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // For production, set EXPO_PUBLIC_API_URL in your environment or .env file
+const PRODUCTION_URL = "https://notehub-backend.onrender.com";
 const DEFAULT_IP = "172.29.4.25";
-const TUNNEL_URL = 'https://c39a0b77495a85.lhr.life';
 
 export let BASE_URL = Platform.OS === 'web' 
   ? (typeof window !== 'undefined' && (window.location.hostname.includes('lhr.life') || window.location.hostname.includes('loca.lt')) 
       ? `https://${window.location.hostname}` 
       : `http://${typeof window !== 'undefined' ? window.location.hostname : 'localhost'}:8000`)
-  : TUNNEL_URL;
+  : (process.env.EXPO_PUBLIC_API_URL || PRODUCTION_URL);
 
 // Function to update the URL dynamically
 export const updateBaseUrl = async (newUrl) => {
