@@ -294,6 +294,25 @@ init_db()
 sync_thread = threading.Thread(target=periodic_db_sync_worker, daemon=True)
 sync_thread.start()
 
+@app.get("/sync-status")
+def get_sync_status():
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
+    db_path = os.getenv("DB_PATH", "notehub.db")
+    db_exists = os.path.exists(db_path)
+    db_mtime = os.path.getmtime(db_path) if db_exists else 0.0
+    
+    return {
+        "sync_worker_alive": sync_thread.is_alive() if 'sync_thread' in globals() else False,
+        "supabase_url_configured": bool(supabase_url),
+        "supabase_key_configured": bool(supabase_key),
+        "db_path": db_path,
+        "db_exists": db_exists,
+        "db_mtime": db_mtime,
+        "last_sync_time": last_sync_time,
+        "sync_pending": db_mtime > last_sync_time if db_exists else False
+    }
+
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 
 def hash_password(password: str) -> str:
