@@ -28,6 +28,7 @@ web-build/
 # API Keys - IMPORTANT
 *.env
 .env*
+!*.env.example
 
 
 tests/
