@@ -58,13 +58,16 @@ def get_db():
 
 # ── Supabase SQLite Cloud Backup Sync ──────────────────────────────────────────
 
+import logging
+logger = logging.getLogger("uvicorn.error")
+
 last_sync_time = 0.0
 
 def download_db_from_supabase():
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_key = os.getenv("SUPABASE_KEY")
     if not supabase_url or not supabase_key:
-        print("Supabase credentials not configured. Skipping startup database restore.")
+        logger.warning("Supabase credentials not configured. Skipping startup database restore.")
         return
         
     try:
@@ -74,7 +77,7 @@ def download_db_from_supabase():
             "apikey": supabase_key
         }
         url = f"{supabase_url}/storage/v1/object/authenticated/backups/notehub.db"
-        print(f"Checking Supabase for database backup at: {url}")
+        logger.info(f"Checking Supabase for database backup at: {url}")
         res = http_requests.get(url, headers=headers)
         if res.status_code == 200:
             with open(db_path, "wb") as f:
@@ -86,11 +89,11 @@ def download_db_from_supabase():
                     except: pass
             global last_sync_time
             last_sync_time = os.path.getmtime(db_path)
-            print("Database successfully restored from Supabase on startup!")
+            logger.info("Database successfully restored from Supabase on startup!")
         else:
-            print(f"No database backup found on Supabase (Status Code: {res.status_code}). Starting with a fresh database.")
+            logger.info(f"No database backup found on Supabase (Status Code: {res.status_code}). Starting with a fresh database.")
     except Exception as e:
-        print(f"Error downloading database from Supabase: {e}")
+        logger.error(f"Error downloading database from Supabase: {e}")
 
 def upload_db_to_supabase():
     supabase_url = os.getenv("SUPABASE_URL")
@@ -125,16 +128,16 @@ def upload_db_to_supabase():
         url = f"{supabase_url}/storage/v1/object/backups/notehub.db"
         res = http_requests.put(url, headers=headers, data=file_data)
         if res.status_code == 200:
-            print("Database backup successfully synchronized to Supabase!")
+            logger.info("Database backup successfully synchronized to Supabase!")
         else:
             # Try POST to create new (if file doesn't exist yet)
             res_post = http_requests.post(url, headers=headers, data=file_data)
             if res_post.status_code == 200:
-                print("Database backup successfully initialized on Supabase!")
+                logger.info("Database backup successfully initialized on Supabase!")
             else:
-                print(f"Supabase Sync error: {res_post.status_code} - {res_post.text}")
+                logger.error(f"Supabase Sync error: {res_post.status_code} - {res_post.text}")
     except Exception as e:
-        print(f"Error uploading database to Supabase: {e}")
+        logger.error(f"Error uploading database to Supabase: {e}")
     finally:
         if os.path.exists(temp_backup_path):
             try: os.remove(temp_backup_path)
@@ -143,7 +146,7 @@ def upload_db_to_supabase():
 def periodic_db_sync_worker():
     global last_sync_time
     db_path = os.getenv("DB_PATH", "notehub.db")
-    print("Supabase Background Sync Worker Started!")
+    logger.info("Supabase Background Sync Worker Started!")
     while True:
         # Wait 30 seconds between checks to minimize bandwidth
         time.sleep(30)
@@ -157,11 +160,11 @@ def periodic_db_sync_worker():
             if os.path.exists(db_path):
                 current_mtime = os.path.getmtime(db_path)
                 if current_mtime > last_sync_time:
-                    print("Change detected in local database. Syncing to Supabase...")
+                    logger.info("Change detected in local database. Syncing to Supabase...")
                     upload_db_to_supabase()
                     last_sync_time = current_mtime
         except Exception as e:
-            print(f"Error in background sync worker: {e}")
+            logger.error(f"Error in background sync worker: {e}")
 
 def init_db():
     conn = get_db()
