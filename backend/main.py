@@ -59,6 +59,7 @@ def get_db():
 # ── Supabase SQLite Cloud Backup Sync ──────────────────────────────────────────
 
 import logging
+import time
 logger = logging.getLogger("uvicorn.error")
 
 last_sync_time = 0.0
